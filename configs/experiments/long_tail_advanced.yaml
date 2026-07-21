@@ -1,0 +1,72 @@
+extends: ../../config.yaml
+
+model:
+  species_classifier:
+    type: cosine
+    initial_scale: 20.0
+    learnable_scale: true
+    maximum_scale: 100.0
+  prototype_classifier:
+    enabled: true
+    update: static
+    momentum: 0.99
+    scale: 20.0
+    fusion:
+      enabled: true
+      mode: frequency_dependent
+      learned_weight: 0.5
+      prototype_strength: 10.0
+  dual_species_classifier:
+    enabled: true
+    classifier_type: cosine
+    inference:
+      mode: fused
+      natural_weight: 0.5
+      frequency_dependent: true
+
+training:
+  compile:
+    enabled: true
+    mode: default
+  dual_species_classifier:
+    natural_loss_weight: 1.0
+    balanced_loss_weight: 1.0
+    balanced_method: logit_adjustment
+    tau: 0.5
+
+long_tail:
+  staged_training:
+    enabled: true
+    stage2_epochs: 10
+    head_replay_fraction: 0.50
+    classifier_initialisation: prototype
+    trainable_scope: heads
+    val_interval: 5
+
+multi_task:
+  hierarchical_contrastive:
+    enabled: true
+    weight: 0.05
+    temperature: 0.1
+    same_species_weight: 1.0
+    same_genus_weight: 0.25
+    projection_dim: 256
+    use_two_views: true
+  balanced_contrastive:
+    enabled: true
+    weight: 0.1
+    temperature: 0.1
+    projection_dim: 256
+    include_class_prototypes: true
+    class_average: true
+
+evaluation:
+  taxonomic_distance:
+    enabled: true
+    same_species_cost: 0.0
+    same_genus_cost: 1.0
+    different_genus_cost: 2.0
+
+inference:
+  taxonomic_minimum_risk:
+    enabled: false

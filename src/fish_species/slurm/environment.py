@@ -456,7 +456,7 @@ def resolve_submission_environment(
     scratch = _get_nested(resolved, "slurm.scratch")
     if (
         isinstance(scratch, dict)
-        and scratch.get("mode") == "node_local"
+        and scratch.get("mode") in {"node_local", "node_local_cache"}
         and bool(scratch.get("unique_per_submission", False))
     ):
         if not context.submission_stamp or context.process_id is None:

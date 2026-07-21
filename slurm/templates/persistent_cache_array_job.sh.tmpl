@@ -5,6 +5,7 @@ set -euo pipefail
 ARTIFACT_ROOT=@@ARTIFACT_ROOT@@
 CACHE_ROOT=@@CACHE_ROOT@@
 CACHE_READY_MARKER=@@CACHE_READY_MARKER@@
+CLEANUP_AFTER_RUN=@@CLEANUP_AFTER_RUN@@
 CONDA_ENV=@@CONDA_ENV@@
 CONDA_SH=@@CONDA_SH@@
 COPY_CACHE_TO_TMP=@@COPY_CACHE_TO_TMP@@
@@ -45,6 +46,14 @@ copy_results_back() {
     printf '%s\n' "$status" > "${RUN_SCRATCH_OUT}/run_status.txt"
     rsync -a "$RUN_SCRATCH_OUT/" "$RUN_BACK_OUT/"
     copy_status=$?
+    if [[ "$CLEANUP_AFTER_RUN" == "true" && "$CACHE_INPUT" == "$LOCAL_CACHE" ]]; then
+        if [[ "$LOCAL_CACHE" != "$JOB_TMP"/* || "$LOCAL_CACHE" != */fish_species/image_cache ]]; then
+            echo "Refusing unsafe local-cache cleanup: $LOCAL_CACHE" >&2
+            if (( status == 0 )); then status=91; fi
+        else
+            rm -rf -- "$LOCAL_CACHE"
+        fi
+    fi
     if (( copy_status != 0 && status == 0 )); then status=90; fi
     exit "$status"
 }

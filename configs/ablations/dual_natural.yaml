@@ -1,0 +1,6 @@
+extends: ../../config.yaml
+model:
+  dual_species_classifier: {enabled: true, inference: {mode: natural}}
+training:
+  dual_species_classifier: {balanced_method: none, balanced_loss_weight: 0.0}
+

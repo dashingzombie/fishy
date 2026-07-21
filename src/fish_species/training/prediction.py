@@ -26,6 +26,7 @@ def predict_unlabeled_split(
     use_amp: bool,
     enforce_hierarchy: bool,
     hierarchy_genus_weight: float,
+    amp_dtype: torch.dtype = torch.bfloat16,
 ) -> pd.DataFrame:
     """Return top-1 genus/species predictions and calibrated softmax scores."""
     model.eval()
@@ -55,6 +56,7 @@ def predict_unlabeled_split(
             with torch.amp.autocast(
                 enabled=use_amp and device.type == "cuda",
                 device_type=device.type,
+                dtype=amp_dtype,
             ):
                 logits = model(images)
 
@@ -62,7 +64,8 @@ def predict_unlabeled_split(
             confidences: dict[str, list[float]] = {}
             raw_genus: list[str] | None = None
             raw_consistency: list[bool] | None = None
-            for task, task_logits in logits.items():
+            for task in index_to_label_by_task:
+                task_logits = logits[task]
                 probabilities = F.softmax(task_logits.float(), dim=1)
                 confidence, indices = probabilities.max(dim=1)
                 predictions[task] = _decode(
@@ -227,6 +230,11 @@ def export_unlabeled_predictions(
             ),
             hierarchy_genus_weight=float(
                 inference_cfg.get("hierarchy_genus_weight", 1.0)
+            ),
+            amp_dtype=(
+                torch.bfloat16 if cfg.get("training", {}).get(
+                    "amp_dtype", "bfloat16"
+                ) == "bfloat16" else torch.float16
             ),
         )
         path = out_dir / f"predictions_{split_name}_{checkpoint_name}.csv"

@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from ..training.checkpoints import load_checkpoint
+from ..training.checkpoints import load_model_state_compat
 from ..data.datasets import MultiTaskFishImageDataset
 from ..data.transforms import build_split_transform
 from ..results.writing import save_json
@@ -461,7 +462,11 @@ def evaluate_test_cue_suppression(
         checkpoint_path,
         map_location=device,
     )
-    model.load_state_dict(checkpoint["model_state"])
+    missing, ignored = load_model_state_compat(model, checkpoint["model_state"])
+    if missing:
+        print("Newly initialized checkpoint modules: " + ", ".join(missing))
+    if ignored:
+        print("Checkpoint parameters not used by this architecture: " + ", ".join(ignored))
 
     for condition_index, condition in enumerate(conditions, start=1):
         signature = _test_condition_signature(

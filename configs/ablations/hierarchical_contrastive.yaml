@@ -1,0 +1,4 @@
+extends: ../../config.yaml
+multi_task:
+  hierarchical_contrastive: {enabled: true}
+

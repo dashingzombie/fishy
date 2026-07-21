@@ -910,6 +910,95 @@ def _validate_evaluation(config: dict[str, Any], issues: list[ValidationIssue]) 
             ))
 
 
+def _validate_long_tail_features(
+    config: dict[str, Any], issues: list[ValidationIssue]
+) -> None:
+    """Validate opt-in long-tail modules and reject ambiguous correction stacks."""
+    model = config.get("model", {}) or {}
+    training = config.get("training", {}) or {}
+    multi = config.get("multi_task", {}) or {}
+    target_cols = (config.get("data", {}) or {}).get("target_cols", {}) or {}
+    species = model.get("species_classifier", {}) or {}
+    if species.get("type", "linear") not in {"linear", "cosine"}:
+        issues.append(ValidationIssue("model.species_classifier.type", "must be 'linear' or 'cosine'"))
+    initial_scale = species.get("initial_scale", 20.0)
+    maximum_scale = species.get("maximum_scale", 100.0)
+    if _number(issues, "model.species_classifier.initial_scale", initial_scale, minimum=0, exclusive_minimum=True):
+        if _number(issues, "model.species_classifier.maximum_scale", maximum_scale, minimum=0, exclusive_minimum=True):
+            if float(initial_scale) > float(maximum_scale):
+                issues.append(ValidationIssue("model.species_classifier.initial_scale", "must not exceed maximum_scale"))
+
+    prototype = model.get("prototype_classifier", {}) or {}
+    if bool(prototype.get("enabled", False)) and "species" not in target_cols:
+        issues.append(ValidationIssue("model.prototype_classifier.enabled", "requires a labelled species training task"))
+    momentum = prototype.get("momentum", 0.99)
+    if _number(issues, "model.prototype_classifier.momentum", momentum, minimum=0, maximum=1):
+        if float(momentum) >= 1:
+            issues.append(ValidationIssue("model.prototype_classifier.momentum", "must be < 1"))
+    fusion = prototype.get("fusion", {}) or {}
+    _number(issues, "model.prototype_classifier.scale", prototype.get("scale", 20.0), minimum=0, exclusive_minimum=True)
+    _number(issues, "model.prototype_classifier.fusion.learned_weight", fusion.get("learned_weight", 0.5), minimum=0, maximum=1)
+    _number(issues, "model.prototype_classifier.fusion.prototype_strength", fusion.get("prototype_strength", 10.0), minimum=0)
+
+    staged = (config.get("long_tail", {}) or {}).get("staged_training", {}) or {}
+    initialisation = staged.get("classifier_initialisation", "keep")
+    if initialisation == "prototype" and not bool(prototype.get("enabled", False)):
+        issues.append(ValidationIssue("long_tail.staged_training.classifier_initialisation", "prototype initialization requires model.prototype_classifier.enabled=true"))
+    if staged.get("trainable_scope", "full_model") not in {"heads", "heads_and_last_block", "full_model"}:
+        issues.append(ValidationIssue("long_tail.staged_training.trainable_scope", "unsupported Stage 2 trainable scope"))
+
+    for name in ("hierarchical_contrastive", "balanced_contrastive"):
+        block = multi.get(name, {}) or {}
+        if bool(block.get("enabled", False)):
+            _number(issues, f"multi_task.{name}.temperature", block.get("temperature", 0.1), minimum=0, exclusive_minimum=True)
+            _number(issues, f"multi_task.{name}.weight", block.get("weight", 0.0), minimum=0)
+            projection_dim = block.get("projection_dim", 256)
+            if isinstance(projection_dim, bool) or not isinstance(projection_dim, int) or projection_dim <= 0:
+                issues.append(ValidationIssue(f"multi_task.{name}.projection_dim", "must be positive"))
+    hierarchical = multi.get("hierarchical_contrastive", {}) or {}
+    for key, default in (("same_species_weight", 1.0), ("same_genus_weight", 0.25)):
+        _number(issues, f"multi_task.hierarchical_contrastive.{key}", hierarchical.get(key, default), minimum=0)
+    if bool((multi.get("hierarchical_contrastive", {}) or {}).get("enabled", False)) and "genus" not in target_cols:
+        issues.append(ValidationIssue("multi_task.hierarchical_contrastive.enabled", "requires genus metadata in data.target_cols"))
+    balanced_contrast = multi.get("balanced_contrastive", {}) or {}
+    if bool(balanced_contrast.get("enabled", False)) and bool(balanced_contrast.get("include_class_prototypes", True)) and not bool(prototype.get("enabled", False)):
+        issues.append(ValidationIssue("multi_task.balanced_contrastive.include_class_prototypes", "requires model.prototype_classifier.enabled=true"))
+
+    dual = model.get("dual_species_classifier", {}) or {}
+    dual_training = training.get("dual_species_classifier", {}) or {}
+    if dual.get("classifier_type", "cosine") not in {"linear", "cosine"}:
+        issues.append(ValidationIssue("model.dual_species_classifier.classifier_type", "must be 'linear' or 'cosine'"))
+    inference = dual.get("inference", {}) or {}
+    if inference.get("mode", "fused") not in {"natural", "balanced", "fused"}:
+        issues.append(ValidationIssue("model.dual_species_classifier.inference.mode", "must be 'natural', 'balanced', or 'fused'"))
+    _number(issues, "model.dual_species_classifier.inference.natural_weight", inference.get("natural_weight", 0.5), minimum=0, maximum=1)
+    method = dual_training.get("balanced_method", "logit_adjustment")
+    if method not in {"logit_adjustment", "class_weight", "none"}:
+        issues.append(ValidationIssue("training.dual_species_classifier.balanced_method", "unsupported balanced-head correction"))
+    if bool(dual.get("enabled", False)):
+        _number(issues, "training.dual_species_classifier.natural_loss_weight", dual_training.get("natural_loss_weight", 1.0), minimum=0)
+        _number(issues, "training.dual_species_classifier.balanced_loss_weight", dual_training.get("balanced_loss_weight", 1.0), minimum=0)
+        _number(issues, "training.dual_species_classifier.tau", dual_training.get("tau", 1.0), minimum=0)
+        corrections = int(method != "none")
+        corrections += int(bool(training.get("class_weight", False)))
+        corrections += int(bool((training.get("logit_adjustment", {}) or {}).get("enabled", False)))
+        corrections += int(str((training.get("sampling", {}) or {}).get("strategy", "random")) == "weighted")
+        if corrections > 1:
+            issues.append(ValidationIssue("training.dual_species_classifier", "multiple unintended imbalance corrections are enabled"))
+
+    taxonomy = (config.get("evaluation", {}) or {}).get("taxonomic_distance", {}) or {}
+    min_risk = bool(((config.get("inference", {}) or {}).get("taxonomic_minimum_risk", {}) or {}).get("enabled", False))
+    if (bool(taxonomy.get("enabled", False)) or min_risk) and not {"species", "genus"}.issubset(target_cols):
+        issues.append(ValidationIssue("inference.taxonomic_minimum_risk.enabled", "taxonomic evaluation requires species and genus mappings"))
+    for key in ("same_species_cost", "same_genus_cost", "different_genus_cost"):
+        _number(issues, f"evaluation.taxonomic_distance.{key}", taxonomy.get(key, {"same_species_cost": 0, "same_genus_cost": 1, "different_genus_cost": 2}[key]), minimum=0)
+    costs = [float(taxonomy.get(key, default)) for key, default in (
+        ("same_species_cost", 0), ("same_genus_cost", 1), ("different_genus_cost", 2)
+    ) if isinstance(taxonomy.get(key, default), (int, float))]
+    if len(costs) == 3 and costs != sorted(costs):
+        issues.append(ValidationIssue("evaluation.taxonomic_distance", "costs must be nondecreasing with taxonomic distance"))
+
+
 def validate_config(
     config: dict[str, Any],
     *,
@@ -960,6 +1049,7 @@ def validate_config(
         ("preprocessing.image_size", 0, None, True),
         ("training.epochs", 0, None, True),
         ("training.batch_size", 0, None, True),
+        ("training.eval_batch_size", 0, None, True),
         ("training.lr", 0, None, True),
         ("training.weight_decay", 0, None, False),
         ("training.num_workers", 0, None, False),
@@ -974,6 +1064,7 @@ def validate_config(
         ("long_tail.head_min_samples", 2, None, False),
         ("long_tail.staged_training.stage2_epochs", 0, None, True),
         ("long_tail.staged_training.head_replay_fraction", 0, 1, False),
+        ("long_tail.staged_training.val_interval", 0, None, True),
         ("inference.hierarchy_genus_weight", 0, None, False),
     ):
         value = _get(config, path)
@@ -1080,6 +1171,7 @@ def validate_config(
     _validate_transform_parameters(config, issues)
     _validate_sweeps(config, issues, resolved_workflow)
     _validate_evaluation(config, issues)
+    _validate_long_tail_features(config, issues)
     _validate_condition_matrix(config, issues, resolved_workflow)
     _validate_canonical_training_switches(config, issues)
 

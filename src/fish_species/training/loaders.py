@@ -45,6 +45,7 @@ class LoaderBundle:
     species_counts: dict[str, int] | None = None
     stage_one_train_df: object | None = None
     tail_replay_df: object | None = None
+    prototype_loader: DataLoader | None = None
 
 
 class DistributedWeightedSampler(Sampler[int]):
@@ -73,6 +74,21 @@ class DistributedWeightedSampler(Sampler[int]):
             generator=generator,
         )
         return iter(indices[self.rank :: self.world_size].tolist())
+
+
+class DistributedEvalSampler(Sampler[int]):
+    """Partition evaluation examples across ranks without padding duplicates."""
+
+    def __init__(self, dataset) -> None:
+        self.length = len(dataset)
+        self.rank = int(os.environ["RANK"])
+        self.world_size = int(os.environ["WORLD_SIZE"])
+
+    def __len__(self) -> int:
+        return len(range(self.rank, self.length, self.world_size))
+
+    def __iter__(self):
+        return iter(range(self.rank, self.length, self.world_size))
 
 
 def _distributed_training() -> bool:
@@ -361,13 +377,25 @@ def make_profile_loaders(cfg: dict, profile: TrainingProfile) -> LoaderBundle:
         else train_df
     )
     tail_replay_df = _tail_replay_frame(train_df, cfg) if long_tail_enabled else None
-    train_ds = MultiTaskImageDataset(stage_one_df, transform=train_tf, **common_kwargs)
+    contrastive_cfg = cfg.get("multi_task", {}) or {}
+    two_views = any(
+        bool((contrastive_cfg.get(name, {}) or {}).get("enabled", False))
+        and bool((contrastive_cfg.get(name, {}) or {}).get("use_two_views", True))
+        for name in ("hierarchical_contrastive", "balanced_contrastive")
+    )
+    train_ds = MultiTaskImageDataset(
+        stage_one_df,
+        transform=train_tf,
+        second_transform=train_tf if two_views else None,
+        **common_kwargs,
+    )
     val_ds = MultiTaskImageDataset(val_df, transform=eval_tf, **common_kwargs)
     test_ds = MultiTaskImageDataset(
         test_df, transform=eval_tf, **common_kwargs
     )
 
     batch_size = cfg["training"]["batch_size"]
+    eval_batch_size = int(cfg["training"].get("eval_batch_size", batch_size))
     configured_workers = int(cfg["training"].get("num_workers", 4))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     num_workers = (
@@ -375,14 +403,25 @@ def make_profile_loaders(cfg: dict, profile: TrainingProfile) -> LoaderBundle:
         if configured_workers > 0
         else 0
     )
-    train_loader_kwargs = {"num_workers": num_workers, "pin_memory": True}
-    eval_loader_kwargs = {"num_workers": num_workers, "pin_memory": True}
+    persistent_workers = bool(cfg["training"].get("persistent_workers", False))
+    train_loader_kwargs = {
+        "num_workers": num_workers, "pin_memory": True,
+        "persistent_workers": persistent_workers and num_workers > 0,
+    }
+    eval_loader_kwargs = {
+        "num_workers": num_workers, "pin_memory": True,
+        "persistent_workers": persistent_workers and num_workers > 0,
+    }
     if num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = 4
         eval_loader_kwargs["prefetch_factor"] = 2
 
     species_col = target_cols.get("species", cfg["data"]["target_col"])
     train_sampler = _training_sampler(train_ds, stage_one_df, cfg, species_col)
+    eval_sampler = lambda dataset: (
+        DistributedEvalSampler(dataset)
+        if _distributed_training() else None
+    )
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -392,14 +431,14 @@ def make_profile_loaders(cfg: dict, profile: TrainingProfile) -> LoaderBundle:
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=batch_size,
-        shuffle=False,
+        batch_size=eval_batch_size,
+        shuffle=False, sampler=eval_sampler(val_ds),
         **eval_loader_kwargs,
     )
     test_loader = DataLoader(
         test_ds,
-        batch_size=batch_size,
-        shuffle=False,
+        batch_size=eval_batch_size,
+        shuffle=False, sampler=eval_sampler(test_ds),
         **eval_loader_kwargs,
     )
     head_val_loader = None
@@ -416,10 +455,14 @@ def make_profile_loaders(cfg: dict, profile: TrainingProfile) -> LoaderBundle:
             transform=eval_tf,
             **common_kwargs,
         )
-        head_val_loader = DataLoader(head_val_ds, batch_size=batch_size, shuffle=False, **eval_loader_kwargs)
-        head_test_loader = DataLoader(head_test_ds, batch_size=batch_size, shuffle=False, **eval_loader_kwargs)
+        head_val_loader = DataLoader(head_val_ds, batch_size=eval_batch_size, shuffle=False, sampler=eval_sampler(head_val_ds), **eval_loader_kwargs)
+        head_test_loader = DataLoader(head_test_ds, batch_size=eval_batch_size, shuffle=False, sampler=eval_sampler(head_test_ds), **eval_loader_kwargs)
         if tail_replay_df is not None:
-            tail_ds = MultiTaskImageDataset(tail_replay_df, transform=train_tf, **common_kwargs)
+            tail_ds = MultiTaskImageDataset(
+                tail_replay_df, transform=train_tf,
+                second_transform=train_tf if two_views else None,
+                **common_kwargs,
+            )
             tail_sampler = _training_sampler(
                 tail_ds, tail_replay_df, cfg, species_col
             )
@@ -463,7 +506,7 @@ def make_profile_loaders(cfg: dict, profile: TrainingProfile) -> LoaderBundle:
             )
             prediction_loaders[split_name] = DataLoader(
                 dataset,
-                batch_size=batch_size,
+                batch_size=eval_batch_size,
                 shuffle=False,
                 **eval_loader_kwargs,
             )
@@ -541,7 +584,7 @@ def make_profile_loaders(cfg: dict, profile: TrainingProfile) -> LoaderBundle:
         context = {
             "test_df": test_df,
             "dataset_kwargs": common_kwargs,
-            "batch_size": batch_size,
+            "batch_size": eval_batch_size,
             "loader_kwargs": eval_loader_kwargs,
             "image_size": image_size,
             "preprocessing": preprocessing,
@@ -549,6 +592,19 @@ def make_profile_loaders(cfg: dict, profile: TrainingProfile) -> LoaderBundle:
             "original_colour_retention": 1.0,
             "training_condition": input_condition,
         }
+
+    prototype_loader = None
+    if bool(((cfg.get("model", {}) or {}).get("prototype_classifier", {}) or {}).get("enabled", False)):
+        prototype_ds = MultiTaskImageDataset(
+            train_df, transform=eval_tf, **common_kwargs
+        )
+        prototype_loader = DataLoader(
+            prototype_ds,
+            batch_size=eval_batch_size,
+            shuffle=False,
+            sampler=eval_sampler(prototype_ds),
+            **eval_loader_kwargs,
+        )
 
     return LoaderBundle(
         train_loader=train_loader,
@@ -568,6 +624,7 @@ def make_profile_loaders(cfg: dict, profile: TrainingProfile) -> LoaderBundle:
         species_counts=species_counts,
         stage_one_train_df=stage_one_df,
         tail_replay_df=tail_replay_df,
+        prototype_loader=prototype_loader,
     )
 
 

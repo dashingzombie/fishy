@@ -128,7 +128,7 @@ def _select_array_template(config: dict[str, Any]) -> str:
     slurm = config["slurm"]
     mode = str(slurm.get("scratch", {}).get("mode", "none"))
     expansion = str(slurm.get("planning", {}).get("external_expansion", "sweep"))
-    if mode == "node_local":
+    if mode in {"node_local", "node_local_cache"}:
         return "node_local_array_job.sh.tmpl"
     if expansion == "dual_cue":
         return "job_local_cue_array_job.sh.tmpl"
@@ -175,11 +175,27 @@ def _array_context(
     configured_data = str(paths.get("data_root", "data"))
     scratch_root = str(scratch.get("root", "/tmp/fish_species"))
     if node_local:
-        runtime_project = f"{scratch_root.rstrip('/')}/project"
-        runtime_data = f"{scratch_root.rstrip('/')}/data"
+        copy_project = bool(scratch.get("copy_project", False))
+        copy_data = bool(scratch.get("copy_data", False))
+        runtime_project = (
+            f"{scratch_root.rstrip('/')}/project"
+            if copy_project else str(configured_project)
+        )
+        runtime_data = (
+            f"{scratch_root.rstrip('/')}/data"
+            if copy_data else configured_data
+        )
         runtime_output = f"{scratch_root.rstrip('/')}/outputs"
-        runtime_cache = f"{scratch_root.rstrip('/')}/image_cache"
-        runtime_metadata = f"{runtime_data}/label_train.json"
+        persistent_node_cache = scratch.get("mode") == "node_local_cache"
+        runtime_cache = (
+            str(paths.get("cache_root", "cache/images"))
+            if persistent_node_cache
+            else f"{scratch_root.rstrip('/')}/image_cache"
+        )
+        runtime_metadata = (
+            f"{runtime_data}/label_train.json"
+            if copy_data else str(paths.get("metadata_csv", "metadata.csv"))
+        )
     else:
         runtime_project = str(configured_project)
         runtime_data = configured_data
@@ -211,11 +227,13 @@ def _array_context(
             "-m",
             "fish_species.training",
         ]
-    return {
+    context = {
         "ARTIFACT_ROOT": shell_quote(artifact_root),
         "CACHE_ROOT": shell_quote(runtime_cache),
         "CACHE_READY_MARKER": shell_quote(
-            f"{scratch_root.rstrip('/')}/IMAGE_CACHE_READY"
+            f"{runtime_cache.rstrip('/')}/CACHE_READY"
+            if node_local and scratch.get("mode") == "node_local_cache"
+            else f"{scratch_root.rstrip('/')}/IMAGE_CACHE_READY"
             if node_local
             else f"{runtime_cache.rstrip('/')}/CACHE_READY"
         ),
@@ -236,6 +254,11 @@ def _array_context(
         "TMP_RESERVE_GB": shell_quote(scratch.get("tmp_reserve_gb", 0)),
         "TRAIN_COMMAND": shell_join(command),
     }
+    if not node_local:
+        context["CLEANUP_AFTER_RUN"] = (
+            "true" if bool(scratch.get("cleanup_after_run", False)) else "false"
+        )
+    return context
 
 
 def _resource_job(
@@ -325,6 +348,11 @@ def _build_jobs(
             slurm=slurm,
             array=f"0-{plan.array_size - 1}%{plan.array_max_active}",
             dependencies=array_dependencies,
+            node=(
+                ",".join(nodes)
+                if scratch.get("mode") in {"node_local", "node_local_cache"}
+                else None
+            ),
         )
     )
     wandb_config = config.get("wandb", {}) or {}
@@ -545,7 +573,7 @@ def _render_bundle(
     _write(root / "run_index.tsv", "\n".join(index_lines) + "\n")
 
     scratch = slurm.get("scratch", {})
-    node_local = scratch.get("mode") == "node_local"
+    node_local = scratch.get("mode") in {"node_local", "node_local_cache"}
     array_template = _select_array_template(config)
     generated = root / "generated_slurm"
     script_names: dict[str, str] = {}
@@ -606,6 +634,12 @@ def _render_bundle(
 
     if bool(slurm.get("setup", {}).get("enabled", False)):
         setup_context = {
+            "COPY_DATA": (
+                "true" if bool(scratch.get("copy_data", False)) else "false"
+            ),
+            "COPY_PROJECT": (
+                "true" if bool(scratch.get("copy_project", False)) else "false"
+            ),
             "DATA_ROOT": shell_quote(slurm.get("paths", {}).get("data_root", "data")),
             "DATA_COPY_COMMAND": shell_join(
                 [
@@ -621,7 +655,7 @@ def _render_bundle(
                     str(slurm.get("paths", {}).get("data_root", "data")).rstrip("/") + "/",
                     f"{str(scratch.get('root')).rstrip('/')}/data/",
                 ]
-            ),
+            ) if bool(scratch.get("copy_data", False)) else ":",
             "PROJECT_ROOT": shell_quote(slurm.get("paths", {}).get("project_root", ".")),
             "READY_MARKER": shell_quote(scratch.get("ready_marker", "READY")),
             "SCRATCH_DATA": shell_quote(f"{str(scratch.get('root')).rstrip('/')}/data"),

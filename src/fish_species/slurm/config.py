@@ -380,7 +380,10 @@ def validate_slurm_config(config: dict[str, Any]) -> None:
 
     scratch = slurm.get("scratch", {})
     mode = scratch.get("mode", "none")
-    if mode not in {"none", "node_local", "persistent_cache", "job_local_cache"}:
+    if mode not in {
+        "none", "node_local", "node_local_cache", "persistent_cache",
+        "job_local_cache",
+    }:
         raise SlurmConfigError(f"Unsupported slurm.scratch.mode: {mode!r}")
     for key in ("copy_project", "copy_data", "reuse_ready_cache", "cleanup_after_run"):
         _require_bool(scratch, key, "slurm.scratch")
@@ -426,7 +429,7 @@ def validate_slurm_config(config: dict[str, Any]) -> None:
             value = slurm.get(key)
             if not isinstance(value, str) or not value.strip():
                 raise SlurmConfigError(f"slurm.{key} is required when SLURM is enabled")
-    if mode == "node_local":
+    if mode in {"node_local", "node_local_cache"}:
         if not bool(scratch.get("unique_per_submission", False)):
             raise SlurmConfigError(
                 "node-local scratch requires slurm.scratch.unique_per_submission=true"
@@ -450,6 +453,15 @@ def validate_slurm_config(config: dict[str, Any]) -> None:
             raise SlurmConfigError("node-local scratch requires slurm.setup.enabled=true")
         if not bool(slurm.get("cleanup", {}).get("enabled", False)):
             raise SlurmConfigError("node-local scratch requires slurm.cleanup.enabled=true")
+        if mode == "node_local_cache":
+            cache_root = slurm.get("paths", {}).get("cache_root")
+            if not isinstance(cache_root, str) or not cache_root.startswith(
+                ("/scratch/", "/tmp/")
+            ):
+                raise SlurmConfigError(
+                    "node_local_cache requires an absolute node-local "
+                    "slurm.paths.cache_root under /scratch or /tmp"
+                )
     if mode in {"persistent_cache", "job_local_cache"}:
         cache_root = slurm.get("paths", {}).get("cache_root")
         if not isinstance(cache_root, str) or not cache_root:

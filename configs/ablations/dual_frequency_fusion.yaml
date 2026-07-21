@@ -1,0 +1,6 @@
+extends: ../../config.yaml
+model:
+  dual_species_classifier:
+    enabled: true
+    inference: {mode: fused, natural_weight: 0.5, frequency_dependent: true}
+

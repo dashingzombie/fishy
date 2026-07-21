@@ -1,0 +1,7 @@
+extends: ../../config.yaml
+model:
+  species_classifier: {type: cosine}
+  prototype_classifier: {enabled: true}
+long_tail:
+  staged_training: {enabled: true, classifier_initialisation: prototype}
+

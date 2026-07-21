@@ -29,6 +29,7 @@ class MultiTaskImageDataset(Dataset):
         crop_pad: float = 0.15,
         target_cols: dict[str, str] | None = None,
         label_to_index_by_task: dict[str, dict[str, int]] | None = None,
+        second_transform=None,
     ):
         self.df = df.reset_index(drop=True)
         self.root_dir = Path(root_dir)
@@ -39,6 +40,7 @@ class MultiTaskImageDataset(Dataset):
         self.target_cols = target_cols
         self.label_to_index_by_task = label_to_index_by_task
         self.transform = transform
+        self.second_transform = second_transform
         self.crop_to_foreground = crop_to_foreground
         self.crop_pad = crop_pad
         self.multi_task = target_cols is not None
@@ -55,7 +57,7 @@ class MultiTaskImageDataset(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
-    def _load_image(self, index: int):
+    def _load_image(self, index: int, transform=None):
         row = self.df.iloc[index]
         image_path = resolve_path(self.root_dir, row[self.image_col])
         image = Image.open(image_path).convert("RGB")
@@ -78,8 +80,9 @@ class MultiTaskImageDataset(Dataset):
                 )
                 image = image.crop(bbox)
 
-        if self.transform is not None:
-            image = self.transform(image)
+        selected_transform = self.transform if transform is None else transform
+        if selected_transform is not None:
+            image = selected_transform(image)
         return row, image, image_path
 
     def __getitem__(self, index: int):
@@ -99,13 +102,20 @@ class MultiTaskImageDataset(Dataset):
                 encoded = self.label_to_index_by_task[task][label_name]
                 label_names[task] = label_name
                 labels[task] = torch.tensor(encoded, dtype=torch.long)
-            return {
+            result = {
                 "image": image,
                 "labels": labels,
                 "label_names": label_names,
                 "path": str(image_path),
                 "sample_id": str(row.get("image_id", Path(image_path).name)),
             }
+            if self.second_transform is not None:
+                # Reload to ensure independent stochastic augmentation state.
+                _, second_image, _ = self._load_image(
+                    index, transform=self.second_transform
+                )
+                result["image_view2"] = second_image
+            return result
 
         label_name = row[self.target_col]
         encoded = self.label_to_index[label_name]

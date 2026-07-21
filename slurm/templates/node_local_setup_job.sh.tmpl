@@ -3,6 +3,8 @@ set -euo pipefail
 
 PROJECT_ROOT=@@PROJECT_ROOT@@
 DATA_ROOT=@@DATA_ROOT@@
+COPY_DATA=@@COPY_DATA@@
+COPY_PROJECT=@@COPY_PROJECT@@
 SCRATCH_ROOT=@@SCRATCH_ROOT@@
 SCRATCH_PROJECT=@@SCRATCH_PROJECT@@
 SCRATCH_DATA=@@SCRATCH_DATA@@
@@ -21,14 +23,18 @@ if [[ ! -f "${SCRATCH_ROOT}/${READY_MARKER}" ]]; then
     find "$SCRATCH_ROOT" -mindepth 1 -maxdepth 1 ! -name SETUP.lock \
         -exec rm -rf -- {} +
     mkdir -p "$SCRATCH_PROJECT" "$SCRATCH_DATA" "$SCRATCH_OUTPUTS"
-    rsync -a \
-        --exclude .git \
-        --exclude __pycache__ \
-        --exclude .ipynb_checkpoints \
-        --exclude outputs \
-        --exclude outputs_slurm \
-        "$PROJECT_ROOT/" "$SCRATCH_PROJECT/"
-    @@DATA_COPY_COMMAND@@
+    if [[ "$COPY_PROJECT" == "true" ]]; then
+        rsync -a \
+            --exclude .git \
+            --exclude __pycache__ \
+            --exclude .ipynb_checkpoints \
+            --exclude outputs \
+            --exclude outputs_slurm \
+            "$PROJECT_ROOT/" "$SCRATCH_PROJECT/"
+    fi
+    if [[ "$COPY_DATA" == "true" ]]; then
+        @@DATA_COPY_COMMAND@@
+    fi
     touch "${SCRATCH_ROOT}/${READY_MARKER}"
 fi
 lscpu

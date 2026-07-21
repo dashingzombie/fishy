@@ -147,6 +147,41 @@ def build_criteria(
     return criteria
 
 
+def build_dual_species_criteria(
+    train_df: pd.DataFrame,
+    species_col: str,
+    label_to_index: dict[str, int],
+    group_col: str,
+    device: torch.device,
+    config: dict,
+) -> tuple[nn.Module, nn.Module]:
+    """Build ordinary natural-head CE and exactly one balanced-head correction."""
+    natural = nn.CrossEntropyLoss()
+    method = str(config.get("balanced_method", "logit_adjustment"))
+    if method == "none":
+        return natural, nn.CrossEntropyLoss()
+    if method == "class_weight":
+        weights = compute_class_weights(
+            train_df, species_col, label_to_index,
+            basis="samples", group_col=group_col,
+        ).to(device)
+        return natural, nn.CrossEntropyLoss(weight=weights)
+    if method == "logit_adjustment":
+        counts = train_df[species_col].value_counts()
+        prior = torch.tensor(
+            [float(counts.get(label, 0)) for label in label_to_index],
+            dtype=torch.float32, device=device,
+        )
+        prior /= prior.sum().clamp_min(1.0)
+        return natural, LogitAdjustedCrossEntropy(
+            prior, tau=float(config.get("tau", 1.0))
+        )
+    raise ValueError(
+        "training.dual_species_classifier.balanced_method must be "
+        "'logit_adjustment', 'class_weight', or 'none'"
+    )
+
+
 def infer_parent_label_from_child_label(child_label: str) -> str:
     """Infer a genus-like parent from a space- or underscore-delimited label."""
     child_label = str(child_label).strip()

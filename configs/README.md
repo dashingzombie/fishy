@@ -4,6 +4,11 @@ Configuration is plain YAML with recursive, mapping-only inheritance through
 `extends`. Lists are replaced, not concatenated. Dotted `key=value` overrides
 remain supported and the resolved value is always an ordinary Python dictionary.
 
+Long-tail examples are deliberately separate runs: the full compatible stack
+is in `experiments/long_tail_advanced.yaml`, while `ablations/` contains the
+linear/cosine, prototype, Stage 2, contrastive, dual-head, and minimum-risk
+conditions. They are not forced into a Cartesian sweep.
+
 ## Inheritance and precedence
 
 ```text
@@ -90,12 +95,16 @@ examples.
 | GHPC transform W&B settings | `configs/experiments/ghpc_colour_transforms.yaml` | 202 |
 | Genome persistent-cache hierarchy sweep | `configs/experiments/persistent_hierarchy.yaml` | 2 |
 | Same persistent sweep with W&B | `configs/experiments/persistent_hierarchy_wandb.yaml` | 2 |
+| Sequential long-tail selection and resolution continuation | `configs/sweeps/fish_long_tail_pipeline.yaml` | 15 first-phase; later top-k dependent |
 
 Use `local.yaml` for rendering and CPU-only planning, `genome.yaml` for shared
 Genome jobs, `genome_persistent.yaml` for Genome persistent-cache sweeps, and
-`ghpc.yaml` for GHPC node-local scratch. Both cluster profiles use the shared
-`${HOME}/classification/{fish-species,data}` layout. GHPC requires an explicit
-GPU-node list before rendering or submission.
+`ghpc.yaml` for GHPC node-local caching. Genome copies the shared ready cache
+into each job and removes the staged copy on exit. GHPC builds a stable cache
+directly on each selected node without transferring project/data/cache inputs,
+and keeps that cache across sweeps while cleaning only unique run scratch. Both
+profiles use the shared `${HOME}/classification/{fish-species,data}` source
+layout. GHPC requires an explicit GPU-node list before rendering or submission.
 
 ## Preferred commands
 
@@ -149,3 +158,5 @@ off so a login node does not need the full dataset tree.
 
 See [the full configuration reference](../config.md) for every
 important switch, condition semantics, resource field, and worked example.
+See [phased sweep pipelines](../docs/sweep_pipelines.md) for planning,
+submission, ranking, retry, resume, and 224 → 320 → 384 continuation.

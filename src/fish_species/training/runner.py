@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.metrics import classification_report
-from sklearn.metrics import confusion_matrix
 
 from ..evaluation.condition_matrix import evaluate_condition_matrix
 from ..evaluation.cue_suppression import evaluate_test_cue_suppression
@@ -19,6 +18,7 @@ from ..models.multitask import build_multitask_model
 from ..results.writing import save_json
 from .checkpoints import build_checkpoint_payload
 from .checkpoints import load_checkpoint
+from .checkpoints import load_model_state_compat
 from .checkpoints import save_checkpoint
 from .epochs import run_hierarchy_epoch
 from .distributed import barrier
@@ -31,6 +31,10 @@ from .loaders import get_input_condition
 from .loaders import make_profile_loaders
 from .losses import build_child_to_parent_matrix
 from .losses import build_criteria
+from .losses import build_dual_species_criteria
+from .stages import apply_stage2_trainable_scope
+from .stages import initialise_species_classifier
+from ..evaluation.taxonomic import species_to_genus_indices
 from .metrics import score_for_selection
 from .modes import TrainingProfile
 from .modes import resolved_run_name
@@ -48,14 +52,67 @@ def initialise_wandb_run(
 
 
 def make_experiment_run_name(cfg: dict, profile: TrainingProfile) -> str:
+    pipeline_run = cfg.get("pipeline_run", {}) or {}
+    if pipeline_run.get("run_id"):
+        return str(pipeline_run["run_id"])
     return resolved_run_name(cfg, profile)
 
 
-def _metric_context(bundle) -> dict:
-    return {
+def _write_pipeline_result_files(
+    cfg: dict,
+    out_dir: Path,
+    validation_metrics: dict,
+    test_metrics: dict,
+    *,
+    best_checkpoint: Path,
+    best_epoch: int,
+    selection_metric: str,
+) -> None:
+    """Write the strict local result contract consumed by sweep pipelines."""
+    pipeline_run = cfg.get("pipeline_run", {}) or {}
+    if not pipeline_run.get("configuration_hash"):
+        return
+    metrics_dir = out_dir / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    save_json(validation_metrics, metrics_dir / "validation_summary.json")
+    save_json(test_metrics, metrics_dir / "test_summary.json")
+    save_json(
+        {
+            "status": "completed",
+            "exit_code": 0,
+            "configuration_hash": str(pipeline_run["configuration_hash"]),
+            "best_checkpoint": str(best_checkpoint.resolve()),
+            "best_epoch": int(best_epoch),
+            "selection_metric": selection_metric,
+            "selection_value": validation_metrics.get(selection_metric),
+        },
+        out_dir / "run_status.json",
+    )
+
+
+def _metric_context(bundle, cfg: dict, dual_criteria=None) -> dict:
+    context = {
         "index_to_label_by_task": bundle.index_to_label_by_task,
         "species_counts": bundle.species_counts or {},
     }
+    taxonomy = (cfg.get("evaluation", {}) or {}).get("taxonomic_distance", {}) or {}
+    minimum_risk = bool(((cfg.get("inference", {}) or {}).get(
+        "taxonomic_minimum_risk", {}
+    ) or {}).get("enabled", False))
+    if bool(taxonomy.get("enabled", False)) or minimum_risk:
+        context["species_to_genus"] = species_to_genus_indices(
+            bundle.index_to_label_by_task,
+            ((cfg.get("multi_task", {}) or {}).get("hierarchy_loss", {}) or {}).get("child_to_parent"),
+        )
+        context["taxonomy_costs"] = {
+            "same_species_cost": float(taxonomy.get("same_species_cost", 0.0)),
+            "same_genus_cost": float(taxonomy.get("same_genus_cost", 1.0)),
+            "different_genus_cost": float(taxonomy.get("different_genus_cost", 2.0)),
+        }
+        context["minimum_risk"] = minimum_risk
+    if dual_criteria is not None:
+        context["dual_criteria"] = dual_criteria
+    return context
 
 
 def _build_optimizer(cfg: dict, model: torch.nn.Module):
@@ -64,11 +121,40 @@ def _build_optimizer(cfg: dict, model: torch.nn.Module):
     ).lower()
     if name != "adamw":
         raise ValueError("training.optimizer.name must be 'adamw'")
+    fused = bool((cfg.get("training", {}).get("optimizer", {}) or {}).get("fused", False))
     return torch.optim.AdamW(
         filter(lambda parameter: parameter.requires_grad, model.parameters()),
         lr=float(cfg["training"]["lr"]),
         weight_decay=float(cfg["training"]["weight_decay"]),
+        fused=fused and torch.cuda.is_available(),
     )
+
+
+def _long_tail_checkpoint_metadata(
+    model: torch.nn.Module, cfg: dict, staged_cfg: dict
+) -> dict:
+    """Build explicit long-tail checkpoint metadata alongside model state."""
+    module = unwrap_model(model)
+    species_cfg = ((cfg.get("model", {}) or {}).get("species_classifier", {}) or {})
+    prototype_cfg = ((cfg.get("model", {}) or {}).get("prototype_classifier", {}) or {})
+    scales: dict[str, float] = {}
+    for name in ("species_head", "natural_head", "balanced_head"):
+        head = getattr(module, name, None)
+        if head is not None and hasattr(head, "scale"):
+            scales[name] = float(head.scale.detach().cpu().item())
+    prototype = getattr(module, "prototype_classifier", None)
+    return {
+        "species_classifier_type": str(species_cfg.get("type", "linear")),
+        "cosine_scale": scales,
+        "prototypes": prototype.prototypes.detach().cpu() if prototype is not None else None,
+        "prototype_counts": prototype.counts.detach().cpu() if prototype is not None else None,
+        "prototype_update_mode": str(prototype_cfg.get("update", "static")) if prototype is not None else None,
+        "dual_species_heads": bool(getattr(module, "dual_enabled", False)),
+        "projection_head_dimensions": sorted(getattr(module, "projection_heads", {}).keys()),
+        "stage2_classifier_initialisation": str(staged_cfg.get("classifier_initialisation", "keep")),
+        "stage2_trainable_scope": str(staged_cfg.get("trainable_scope", "full_model")),
+        "taxonomic_inference": ((cfg.get("inference", {}) or {}).get("taxonomic_minimum_risk", {}) or {}),
+    }
 
 
 def run_test_evaluation(
@@ -89,10 +175,16 @@ def run_test_evaluation(
     matrix: torch.Tensor | None,
     wandb_logger,
     input_condition: dict,
+    cfg: dict,
+    metric_context: dict | None = None,
 ) -> tuple[dict, dict[str, list[int]], dict[str, list[int]]]:
     """Evaluate one checkpoint on the test split and save its outputs."""
     checkpoint = load_checkpoint(checkpoint_path, map_location=device)
-    unwrap_model(model).load_state_dict(checkpoint["model_state"])
+    missing, ignored = load_model_state_compat(unwrap_model(model), checkpoint["model_state"])
+    if missing:
+        print("Newly initialized checkpoint modules: " + ", ".join(missing))
+    if ignored:
+        print("Checkpoint parameters not used by this architecture: " + ", ".join(ignored))
 
     test_metrics, true, pred = run_hierarchy_epoch(
         model,
@@ -107,8 +199,12 @@ def run_test_evaluation(
         normalize,
         hierarchy_cfg,
         matrix,
-        _metric_context(bundle),
+        metric_context or _metric_context(bundle, cfg),
+        cfg,
     )
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+        return test_metrics, true, pred
 
     wandb_condition = (
        f"original_{checkpoint_name}"
@@ -123,21 +219,16 @@ def run_test_evaluation(
         report_path = (
             out_dir / f"classification_report_{checkpoint_name}_{task}.csv"
         )
-        matrix_path = out_dir / f"confusion_matrix_{checkpoint_name}_{task}.csv"
-
         if not len(y_true):
             empty_report = pd.DataFrame(
                 [{"note": "No labelled test examples for this task."}]
             )
             empty_report.to_csv(report_path, index=False)
-            pd.DataFrame().to_csv(matrix_path)
-
             if write_legacy_outputs:
                 empty_report.to_csv(
                     out_dir / f"classification_report_{task}.csv",
                     index=False,
                 )
-                pd.DataFrame().to_csv(out_dir / f"confusion_matrix_{task}.csv")
             continue
 
         report = classification_report(
@@ -148,20 +239,12 @@ def run_test_evaluation(
             output_dict=True,
             zero_division=0,
         )
-        matrix_frame = confusion_matrix(y_true, y_pred, labels=labels)
         report_frame = pd.DataFrame(report).transpose()
-        confusion_frame = pd.DataFrame(
-            matrix_frame,
-            index=names,
-            columns=names,
-        )
 
         report_frame.to_csv(report_path)
-        confusion_frame.to_csv(matrix_path)
 
         if write_legacy_outputs:
             report_frame.to_csv(out_dir / f"classification_report_{task}.csv")
-            confusion_frame.to_csv(out_dir / f"confusion_matrix_{task}.csv")
 
         wandb_logger.log_classification_report(
             condition=wandb_condition,
@@ -169,14 +252,6 @@ def run_test_evaluation(
             report=report,
             metrics=test_metrics,
             train_condition=input_condition,
-        )
-        wandb_logger.log_confusion_matrix(
-            condition=wandb_condition,
-            task=task,
-            y_true=y_true,
-            y_pred=y_pred,
-            class_names=names,
-            title=f"Confusion Matrix ({checkpoint_name}, {task})",
         )
 
     metrics_path = out_dir / f"test_metrics_{checkpoint_name}.json"
@@ -260,6 +335,7 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
         num_classes_by_task,
     ).to(device)
     fine_tuning = cfg.get("fine_tuning", {}) or {}
+    resume_path = None
     if bool(fine_tuning.get("enabled", False)):
         resume_path = Path(str(fine_tuning["checkpoint_path"]))
         resumed = load_checkpoint(resume_path, map_location=device)
@@ -271,8 +347,34 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
                 f"model: checkpoint={resumed_model!r}, config={current_model!r}. "
                 "Pass MODEL=<checkpoint model> to the Make target."
             )
-        model.load_state_dict(resumed["model_state"], strict=True)
+        missing, ignored = load_model_state_compat(model, resumed["model_state"])
+        if missing:
+            print("Newly initialized fine-tuning modules: " + ", ".join(missing))
+        if ignored:
+            print("Fine-tuning parameters not used: " + ", ".join(ignored))
         print(f"Resumed model weights from {resume_path}")
+    base_model = model
+    species_counts_tensor = torch.zeros_like(base_model.species_class_counts)
+    for label, index in bundle.label_to_index_by_task.get("species", {}).items():
+        species_counts_tensor[index] = int((bundle.species_counts or {}).get(label, 0))
+    base_model.species_class_counts.copy_(species_counts_tensor.to(device))
+    prototype_cfg = (cfg.get("model", {}) or {}).get("prototype_classifier", {}) or {}
+    if bool(prototype_cfg.get("enabled", False)):
+        if bundle.prototype_loader is None:
+            raise ValueError("prototype use requires the labelled training subset")
+        amp_dtype = torch.bfloat16 if cfg["training"].get("amp_dtype", "bfloat16") == "bfloat16" else torch.float16
+        base_model.rebuild_prototypes(
+            bundle.prototype_loader, device,
+            use_amp=bool(cfg["training"].get("use_amp", True)),
+            amp_dtype=amp_dtype,
+        )
+        print("Built species prototypes from the labelled training subset")
+    compile_cfg = cfg.get("training", {}).get("compile", {}) or {}
+    if bool(compile_cfg.get("enabled", False)):
+        if not hasattr(torch, "compile"):
+            raise RuntimeError("training.compile.enabled requires torch.compile")
+        model = torch.compile(model, mode=str(compile_cfg.get("mode", "default")))
+        print("torch.compile applied before DistributedDataParallel")
     model = wrap_model(model, distributed)
     print("Model built and moved to device.")
 
@@ -325,6 +427,18 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
             f"{hierarchy_cfg.get('weight', weights.get('hierarchy', 0.1))}"
         )
 
+    dual_criteria = None
+    if bool((((cfg.get("model", {}) or {}).get("dual_species_classifier", {}) or {}).get("enabled", False))):
+        species_col = bundle.target_cols["species"]
+        dual_criteria = build_dual_species_criteria(
+            initial_criteria_df,
+            species_col,
+            bundle.label_to_index_by_task["species"],
+            cfg["data"]["group_col"],
+            device,
+            (cfg.get("training", {}).get("dual_species_classifier", {}) or {}),
+        )
+
     optimizer = _build_optimizer(cfg, model)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
@@ -332,7 +446,7 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
     )
     use_amp = cfg["training"].get("use_amp", True)
     scaler = torch.amp.GradScaler(
-        enabled=use_amp and device.type == "cuda"
+        enabled=(use_amp and device.type == "cuda" and cfg["training"].get("amp_dtype", "bfloat16") == "float16")
     )
 
     early = cfg.get("early_stopping", {})
@@ -356,8 +470,42 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
     stage_one_checkpoint = (
         out_dir / "stage1_best_model.pt" if staged_training else out_dir / "best_model.pt"
     )
-    metric_context = _metric_context(bundle)
+    metric_context = _metric_context(bundle, cfg, dual_criteria)
     stage_one_last_epoch = 0
+
+    if str((cfg.get("pipeline_run", {}) or {}).get("execution_mode", "train")) == "evaluation_only":
+        if resume_path is None:
+            raise ValueError("evaluation-only pipeline runs require a parent checkpoint")
+        validation_metrics = run_hierarchy_epoch(
+            model, bundle.val_loader, criteria, None, device, False, None,
+            use_amp, weights, normalize, hierarchy_cfg, matrix, metric_context, cfg,
+        )[0]
+        test_metrics = run_hierarchy_epoch(
+            model, bundle.test_loader, criteria, None, device, False, None,
+            use_amp, weights, normalize, hierarchy_cfg, matrix, metric_context, cfg,
+        )[0]
+        finalise_distributed(distributed)
+        if not distributed.is_main:
+            return {"run_name": run_name, "worker_rank": distributed.rank}
+        selection = cfg.get("multi_task", {}).get("selection_metric", "mean_macro_f1")
+        _write_pipeline_result_files(
+            cfg, out_dir, validation_metrics, test_metrics,
+            best_checkpoint=resume_path, best_epoch=0,
+            selection_metric=selection,
+        )
+        result = {
+            "run_name": run_name, "out_dir": str(out_dir),
+            "evaluation_only": True,
+            **{f"validation_{key}": value for key, value in validation_metrics.items()},
+            **{f"test_{key}": value for key, value in test_metrics.items()},
+        }
+        if profile.run_summary:
+            save_json(result, out_dir / "run_summary.json")
+        wandb_logger.finalise_run(
+            status="completed",
+            summary={"evaluation_only": True, **validation_metrics},
+        )
+        return result
 
     print(
         f"Training for {cfg['training']['epochs']} epochs with early stopping: "
@@ -380,6 +528,7 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
             hierarchy_cfg,
             matrix,
             metric_context,
+            cfg,
         )
         validate = (
             epoch == 1
@@ -401,6 +550,7 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
                 hierarchy_cfg,
                 matrix,
                 metric_context,
+                cfg,
             )[0]
         else:
             val_metrics = {}
@@ -467,6 +617,9 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
                     selection_metric=selection,
                     best_epoch=best_epoch,
                     training_condition=input_condition,
+                    long_tail_metadata=_long_tail_checkpoint_metadata(
+                        model, cfg, staged_cfg
+                    ),
                 )
                 save_checkpoint(payload, stage_one_checkpoint)
             barrier(distributed)
@@ -502,14 +655,39 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
     barrier(distributed)
 
     stage_two_history: list[dict] = []
-    final_validation_metrics: dict = {}
+    final_validation_metrics: dict = dict(best_selection_metrics)
     if staged_training:
         if bundle.tail_replay_loader is None:
             raise ValueError(
                 "Staged long-tail training requires a non-empty tail replay loader"
             )
         stage_one_payload = load_checkpoint(stage_one_checkpoint, map_location=device)
-        unwrap_model(model).load_state_dict(stage_one_payload["model_state"])
+        missing, ignored = load_model_state_compat(
+            unwrap_model(model), stage_one_payload["model_state"]
+        )
+        if missing:
+            print("Newly initialized Stage 2 modules: " + ", ".join(missing))
+        if ignored:
+            print("Stage 1 parameters not used in Stage 2: " + ", ".join(ignored))
+        initialization = str(staged_cfg.get("classifier_initialisation", "keep"))
+        initialise_species_classifier(
+            unwrap_model(model), initialization,
+            initial_scale=float((((cfg.get("model", {}) or {}).get("species_classifier", {}) or {}).get("initial_scale", 20.0))),
+        )
+        trainable_scope = str(staged_cfg.get("trainable_scope", "full_model"))
+        trainable_count, frozen_count = apply_stage2_trainable_scope(
+            unwrap_model(model), trainable_scope
+        )
+        print(
+            f"Stage 2 initialization={initialization}, scope={trainable_scope}; "
+            f"trainable parameters={trainable_count:,}, frozen={frozen_count:,}"
+        )
+        wandb_logger.update_summary({
+            "stage2_classifier_initialisation": initialization,
+            "stage2_trainable_scope": trainable_scope,
+            "stage2_trainable_parameters": trainable_count,
+            "stage2_frozen_parameters": frozen_count,
+        })
         stage_two_epochs = int(staged_cfg.get("stage2_epochs", 20))
         criteria = build_criteria(
             bundle.tail_replay_df,
@@ -521,6 +699,15 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
             class_weighting=cfg.get("training", {}).get("class_weighting", {}),
             logit_adjustment=cfg.get("training", {}).get("logit_adjustment", {}),
         )
+        if dual_criteria is not None:
+            dual_criteria = build_dual_species_criteria(
+                bundle.tail_replay_df,
+                bundle.target_cols["species"],
+                bundle.label_to_index_by_task["species"],
+                cfg["data"]["group_col"], device,
+                (cfg.get("training", {}).get("dual_species_classifier", {}) or {}),
+            )
+            metric_context["dual_criteria"] = dual_criteria
         optimizer = _build_optimizer(cfg, model)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=stage_two_epochs
@@ -546,22 +733,20 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
                 hierarchy_cfg,
                 matrix,
                 metric_context,
+                cfg,
             )[0]
-            final_validation_metrics = run_hierarchy_epoch(
-                model,
-                bundle.val_loader,
-                criteria,
-                None,
-                device,
-                False,
-                None,
-                use_amp,
-                weights,
-                normalize,
-                hierarchy_cfg,
-                matrix,
-                metric_context,
-            )[0]
+            stage2_interval = int(staged_cfg.get("val_interval", 5))
+            validate_stage2 = (
+                stage_epoch == 1 or stage_epoch % stage2_interval == 0
+                or stage_epoch == stage_two_epochs
+            )
+            if validate_stage2:
+                final_validation_metrics = run_hierarchy_epoch(
+                    model, bundle.val_loader, criteria, None, device, False,
+                    None, use_amp, weights, normalize, hierarchy_cfg, matrix,
+                    metric_context, cfg,
+                )[0]
+            logged_validation_metrics = final_validation_metrics if validate_stage2 else {}
             learning_rate = float(optimizer.param_groups[0]["lr"])
             scheduler.step()
             global_epoch = stage_one_last_epoch + stage_epoch
@@ -571,20 +756,19 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
                 **{f"train_{key}": value for key, value in train_metrics.items()},
                 **{
                     f"val_{key}": value
-                    for key, value in final_validation_metrics.items()
+                    for key, value in logged_validation_metrics.items()
                 },
             })
             wandb_logger.log_epoch_metrics(
                 epoch=global_epoch,
                 learning_rate=learning_rate,
                 train_metrics=train_metrics,
-                val_metrics=final_validation_metrics,
+                val_metrics=logged_validation_metrics,
             )
             print(
                 f"[{run_name}] Tail stage {stage_epoch:03d}/{stage_two_epochs} | "
                 f"train loss {train_metrics['loss']:.4f} | "
-                f"all-species val {selection} "
-                f"{final_validation_metrics[selection]:.4f}"
+                + (f"all-species val {selection} {final_validation_metrics[selection]:.4f}" if validate_stage2 else "validation skipped")
             )
 
         best = score_for_selection(final_validation_metrics, selection)
@@ -615,6 +799,7 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
         selection_metric=selection,
         best_epoch=best_epoch,
         training_condition=input_condition,
+        long_tail_metadata=_long_tail_checkpoint_metadata(model, cfg, staged_cfg),
     )
     if distributed.is_main:
         save_checkpoint(final_payload, out_dir / "last_model.pt")
@@ -629,10 +814,6 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
     print(
         f"[{run_name}] Last model saved"
     )
-    model = unwrap_model(model)
-    finalise_distributed(distributed)
-    if not distributed.is_main:
-        return {"run_name": run_name, "worker_rank": distributed.rank}
     # Evaluate the final checkpoint first, then the best checkpoint. This leaves
     # ``model`` loaded with the best weights for stress and condition evaluation.
     last_test_metrics, _, _ = run_test_evaluation(
@@ -652,6 +833,8 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
         matrix=matrix,
         wandb_logger=wandb_logger,
         input_condition=input_condition,
+        cfg=cfg,
+        metric_context=metric_context,
     )
     test_metrics, true, pred = run_test_evaluation(
         checkpoint_name="best",
@@ -670,7 +853,13 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
         matrix=matrix,
         wandb_logger=wandb_logger,
         input_condition=input_condition,
+        cfg=cfg,
+        metric_context=metric_context,
     )
+    model = unwrap_model(model)
+    finalise_distributed(distributed)
+    if not distributed.is_main:
+        return {"run_name": run_name, "worker_rank": distributed.rank}
     prediction_paths = export_unlabeled_predictions(
         model=model,
         bundle=bundle,
@@ -768,6 +957,8 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
         "out_dir": str(out_dir),
         "best_val_score": best,
         "selection_metric": selection,
+        "stage2_classifier_initialisation": str(staged_cfg.get("classifier_initialisation", "keep")),
+        "stage2_trainable_scope": str(staged_cfg.get("trainable_scope", "full_model")),
         "prediction_paths": json.dumps(prediction_paths, sort_keys=True),
         **{f"test_{key}": value for key, value in test_metrics.items()},
         **{f"last_test_{key}": value for key, value in last_test_metrics.items()},
@@ -793,6 +984,8 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
             "best_epoch": best_epoch,
             "best_val_score": best,
             "selection_metric": selection,
+            "stage2_classifier_initialisation": str(staged_cfg.get("classifier_initialisation", "keep")),
+            "stage2_trainable_scope": str(staged_cfg.get("trainable_scope", "full_model")),
             "prediction_paths": json.dumps(
                 prediction_paths, sort_keys=True
             ),
@@ -823,12 +1016,24 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
     if profile.run_summary:
         save_json(result, out_dir / "run_summary.json")
 
+    _write_pipeline_result_files(
+        cfg,
+        out_dir,
+        final_validation_metrics,
+        test_metrics,
+        best_checkpoint=out_dir / "best_model.pt",
+        best_epoch=best_epoch,
+        selection_metric=selection,
+    )
+
     summary = {
         "best_epoch": best_epoch,
         "best_val_score": best,
         "selection_metric": selection,
         f"best_test_{selection}": test_metrics.get(selection),
         f"last_test_{selection}": last_test_metrics.get(selection),
+        "stage2_classifier_initialisation": str(staged_cfg.get("classifier_initialisation", "keep")),
+        "stage2_trainable_scope": str(staged_cfg.get("trainable_scope", "full_model")),
     }
     if profile.loader_mode == "condition":
         summary.update({
@@ -853,7 +1058,6 @@ def run_one(cfg: dict, profile: TrainingProfile) -> dict:
         out_dir / "best_model.pt",
         out_dir / "stage1_best_model.pt",
         *sorted(out_dir.glob("classification_report_*.csv")),
-        *sorted(out_dir.glob("confusion_matrix_*.csv")),
         *sorted(out_dir.glob("predictions_*.csv")),
         out_dir / "prediction.json",
     ]

@@ -1,0 +1,5 @@
+extends: ../../config.yaml
+evaluation:
+  taxonomic_distance: {enabled: true}
+inference:
+  taxonomic_minimum_risk: {enabled: true}

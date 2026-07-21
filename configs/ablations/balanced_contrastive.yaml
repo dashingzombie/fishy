@@ -1,0 +1,6 @@
+extends: ../../config.yaml
+model:
+  prototype_classifier: {enabled: true, fusion: {enabled: false}}
+multi_task:
+  balanced_contrastive: {enabled: true, include_class_prototypes: true}
+

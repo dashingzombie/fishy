@@ -81,4 +81,24 @@ Each condition is passed through the same pipeline in
 The official `unseen` split has no supplied labels. This supervised model emits
 closed-set predictions among labeled training species; learning truly unseen
 species would require a separate zero-shot method.
+
+## Long-tail extensions
+
+The opt-in cosine/prototype/dual classifiers, contrastive losses, Stage 2
+controls, and taxonomic-risk evaluation are documented in
+[config.md](config.md#long-tail-classification). The complete example is
+`configs/experiments/long_tail_advanced.yaml`; independent conditions are in
+`configs/ablations/`.
+
+## Automated phased sweeps
+
+Sequential, resumable long-tail model selection is documented in
+[docs/sweep_pipelines.md](docs/sweep_pipelines.md). The complete 224 → 320 →
+384 example is `configs/sweeps/fish_long_tail_pipeline.yaml`; it uses small
+phase-local products, immutable parent inheritance, deterministic hashes,
+strict result collection, and optional SLURM `afterany` auto-advancement.
+W&B logs metrics and lightweight scientific records only: model checkpoints
+are excluded, and confusion matrices are not generated.
+The separate [educational internals guide](docs/sweep_pipeline_internals.md)
+explains every sweep function, reused repository API, and key library call.
 # fishy

@@ -66,7 +66,8 @@ def wrap_model(model: torch.nn.Module, context: DistributedContext) -> torch.nn.
 
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
-    return model.module if isinstance(model, DistributedDataParallel) else model
+    unwrapped = model.module if isinstance(model, DistributedDataParallel) else model
+    return getattr(unwrapped, "_orig_mod", unwrapped)
 
 
 def barrier(context: DistributedContext) -> None:

@@ -58,18 +58,47 @@ model:
   checkpoint_path: null
   pretrained: true
   freeze_backbone: false
+  species_classifier:
+    type: linear
+    initial_scale: 20.0
+    learnable_scale: true
+    maximum_scale: 100.0
+  prototype_classifier:
+    enabled: false
+    update: static
+    momentum: 0.99
+    scale: 20.0
+    fusion:
+      enabled: true
+      mode: fixed
+      learned_weight: 0.5
+      prototype_strength: 10.0
+  dual_species_classifier:
+    enabled: false
+    classifier_type: cosine
+    inference:
+      mode: fused
+      natural_weight: 0.5
+      frequency_dependent: false
 
 training:
   mode: "multitask"
   epochs: 200
-  batch_size: 48
+  batch_size: 512
+  eval_batch_size: 1024
   lr: 0.0003
   weight_decay: 0.0001
   use_amp: true
-  num_workers: 6
+  amp_dtype: bfloat16
+  num_workers: 16
+  persistent_workers: true
   val_interval: 5
   optimizer:
     name: "adamw"
+    fused: true
+  compile:
+    enabled: false
+    mode: default
   sampling:
     strategy: "random"
   logit_adjustment:
@@ -85,6 +114,11 @@ training:
     basis: "samples"
     method: "inverse_frequency"
     beta: 0.9999
+  dual_species_classifier:
+    natural_loss_weight: 1.0
+    balanced_loss_weight: 1.0
+    balanced_method: logit_adjustment
+    tau: 1.0
 
 long_tail:
   # Head means >10 labeled samples; tail means <=10.
@@ -93,6 +127,9 @@ long_tail:
     enabled: true
     stage2_epochs: 20
     head_replay_fraction: 0.25
+    classifier_initialisation: keep
+    trainable_scope: full_model
+    val_interval: 5
 
 fine_tuning:
   # Resolution upgrades are separate runs resumed from a 224 px checkpoint.
@@ -112,6 +149,21 @@ multi_task:
     parent_task: "genus"
     child_task: "species"
     weight: 0.2
+  hierarchical_contrastive:
+    enabled: false
+    weight: 0.05
+    temperature: 0.1
+    same_species_weight: 1.0
+    same_genus_weight: 0.25
+    projection_dim: 256
+    use_two_views: true
+  balanced_contrastive:
+    enabled: false
+    weight: 0.1
+    temperature: 0.1
+    projection_dim: 256
+    include_class_prototypes: true
+    class_average: true
 
 early_stopping:
   enabled: true
@@ -125,6 +177,8 @@ inference:
   splits: ["test", "unseen"]
   enforce_hierarchy: true
   hierarchy_genus_weight: 1.0
+  taxonomic_minimum_risk:
+    enabled: false
 
 wandb:
   enabled: true
@@ -161,6 +215,11 @@ input_condition:
   parameters: {}
 
 evaluation:
+  taxonomic_distance:
+    enabled: false
+    same_species_cost: 0.0
+    same_genus_cost: 1.0
+    different_genus_cost: 2.0
   test_conditions:
     enabled: false
     conditions: []

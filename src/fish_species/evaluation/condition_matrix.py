@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report
 
 from .cue_suppression import generate_test_cue_conditions
 from .cue_suppression import make_test_condition_loader
@@ -205,21 +205,17 @@ def _write_task_reports(
     wandb_logger: Any = None,
 ) -> None:
     report_dir = root / "classification_reports" / condition_name
-    matrix_dir = root / "confusion_matrices" / condition_name
     report_dir.mkdir(parents=True, exist_ok=True)
-    matrix_dir.mkdir(parents=True, exist_ok=True)
     for task, index_to_label in index_to_label_by_task.items():
         labels = list(range(len(index_to_label)))
         names = [index_to_label[index] for index in labels]
         y_true = np.asarray(true.get(task, []), dtype=int)
         y_pred = np.asarray(pred.get(task, []), dtype=int)
         report_path = report_dir / f"classification_report_{task}.csv"
-        matrix_path = matrix_dir / f"confusion_matrix_{task}.csv"
         if not len(y_true):
             pd.DataFrame(
                 [{"note": "No labelled test examples for this task."}]
             ).to_csv(report_path, index=False)
-            pd.DataFrame().to_csv(matrix_path)
             continue
         report = classification_report(
             y_true,
@@ -229,9 +225,7 @@ def _write_task_reports(
             output_dict=True,
             zero_division=0,
         )
-        matrix = confusion_matrix(y_true, y_pred, labels=labels)
         pd.DataFrame(report).transpose().to_csv(report_path)
-        pd.DataFrame(matrix, index=names, columns=names).to_csv(matrix_path)
         if wandb_logger is not None:
             wandb_logger.log_classification_report(
                 condition=condition_name,
@@ -239,13 +233,6 @@ def _write_task_reports(
                 report=report,
                 metrics=metrics,
                 train_condition=training_condition,
-            )
-            wandb_logger.log_confusion_matrix(
-                condition=condition_name,
-                task=task,
-                y_true=y_true,
-                y_pred=y_pred,
-                class_names=names,
             )
 
 

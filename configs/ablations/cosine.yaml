@@ -1,0 +1,3 @@
+extends: ../../config.yaml
+model: {species_classifier: {type: cosine}}
+

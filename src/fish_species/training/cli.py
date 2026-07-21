@@ -301,7 +301,33 @@ def execute(args, forced_profile: str | None = None):
 
     from .runner import run_one
 
-    results = [run_one(cfg, profile) for cfg in configs]
+    results = []
+    for cfg in configs:
+        try:
+            results.append(run_one(cfg, profile))
+        except Exception as exc:
+            pipeline_run = cfg.get("pipeline_run", {}) or {}
+            if pipeline_run.get("configuration_hash") and int(os.environ.get("RANK", "0")) == 0:
+                run_id = str(pipeline_run.get("run_id") or resolved_run_name(cfg, profile))
+                out_dir = Path(cfg["output"]["out_dir"]) / run_id
+                out_dir.mkdir(parents=True, exist_ok=True)
+                text = str(exc).lower()
+                if "out of memory" in text:
+                    category = "cuda_oom"
+                elif "checkpoint" in text or "configuration" in text or "invalid" in text:
+                    category = "configuration"
+                elif "dataset" in text or "no such file" in text:
+                    category = "missing_dataset"
+                else:
+                    category = "training_failure"
+                temporary = out_dir / f".run_status.json.tmp-{os.getpid()}"
+                temporary.write_text(json.dumps({
+                    "status": "failed", "exit_code": 1,
+                    "configuration_hash": pipeline_run["configuration_hash"],
+                    "failure_category": category, "error": str(exc),
+                }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                os.replace(temporary, out_dir / "run_status.json")
+            raise
     if int(os.environ.get("RANK", "0")) != 0:
         return results
     out = Path(configs[0]["output"]["out_dir"])

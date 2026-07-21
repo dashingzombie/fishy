@@ -1,0 +1,282 @@
+pipeline:
+  name: fish_long_tail_224
+  base_config: configs/experiments/long_tail.yaml
+  output_root: outputs/sweep_pipelines/fish_long_tail_224
+  state_file: outputs/sweep_pipelines/fish_long_tail_224/state.json
+
+  execution:
+    backend: slurm
+    auto_advance: true
+    retry_failed: true
+    maximum_retries: 1
+    array_max_active: 12
+
+  results:
+    source: local
+    metric_file: metrics/validation_summary.json
+    require_status: completed
+
+  selection:
+    primary_metric: species_balanced_accuracy
+    direction: max
+    top_k: 2
+    tie_tolerance: 0.000001
+    tie_breakers:
+      - {metric: species_tail_10_or_fewer_macro_f1, direction: max}
+      - {metric: species_few_shot_2_to_5_macro_f1, direction: max}
+      - {metric: species_macro_f1, direction: max}
+    constraints:
+      - metric: species_represented_species_count
+        operator: greater_equal
+        value_from: phase_max
+        fraction: 0.95
+
+  phases:
+    - name: backbone_lr
+      type: cartesian
+      parent: base
+      overrides:
+        long_tail.staged_training.enabled: false
+        training.sampling.strategy: random
+        training.class_weight: false
+        training.logit_adjustment.enabled: false
+        model.prototype_classifier.enabled: false
+        model.dual_species_classifier.enabled: false
+        multi_task.hierarchical_contrastive.enabled: false
+        multi_task.balanced_contrastive.enabled: false
+        inference.taxonomic_minimum_risk.enabled: false
+      parameters:
+        model.name: [dinov3_vits16, dinov3_vitb16, dinov3_convnext_base, convnext_base, vit_b_16]
+        training.lr: [0.00001, 0.00003, 0.0001]
+      selection: {top_k: 2}
+
+    - name: classifier_and_prototype
+      type: conditions
+      parent: backbone_lr
+      inherit_top_k: 2
+      conditions:
+        - name: linear_baseline
+          baseline: true
+          overrides:
+            model.species_classifier.type: linear
+            model.prototype_classifier.enabled: false
+        - name: cosine
+          overrides:
+            model.species_classifier.type: cosine
+            model.prototype_classifier.enabled: false
+        - name: cosine_prototype_fixed
+          overrides:
+            model.species_classifier.type: cosine
+            model.prototype_classifier.enabled: true
+            model.prototype_classifier.update: static
+            model.prototype_classifier.fusion.enabled: true
+            model.prototype_classifier.fusion.mode: fixed
+            model.prototype_classifier.fusion.learned_weight: 0.5
+        - name: cosine_prototype_frequency
+          overrides:
+            model.species_classifier.type: cosine
+            model.prototype_classifier.enabled: true
+            model.prototype_classifier.update: static
+            model.prototype_classifier.fusion.enabled: true
+            model.prototype_classifier.fusion.mode: frequency_dependent
+            model.prototype_classifier.fusion.prototype_strength: 10.0
+      selection: {top_k: 2}
+
+    - name: imbalance
+      type: conditions
+      parent: classifier_and_prototype
+      inherit_top_k: 2
+      conditions:
+        - name: natural_baseline
+          baseline: true
+          overrides:
+            training.sampling.strategy: random
+            training.class_weight: false
+            training.logit_adjustment.enabled: false
+        - name: logit_tau_025
+          overrides:
+            training.sampling.strategy: random
+            training.class_weight: false
+            training.logit_adjustment.enabled: true
+            training.logit_adjustment.task: species
+            training.logit_adjustment.tau: 0.25
+        - name: logit_tau_050
+          overrides:
+            training.sampling.strategy: random
+            training.class_weight: false
+            training.logit_adjustment.enabled: true
+            training.logit_adjustment.task: species
+            training.logit_adjustment.tau: 0.5
+        - name: logit_tau_100
+          overrides:
+            training.sampling.strategy: random
+            training.class_weight: false
+            training.logit_adjustment.enabled: true
+            training.logit_adjustment.task: species
+            training.logit_adjustment.tau: 1.0
+        - name: weighted_sampling
+          overrides:
+            training.sampling.strategy: weighted
+            training.class_weight: false
+            training.logit_adjustment.enabled: false
+      selection: {top_k: 2}
+
+    - name: contrastive
+      type: conditions
+      parent: imbalance
+      inherit_top_k: 2
+      conditions:
+        - name: no_contrastive
+          baseline: true
+          overrides:
+            multi_task.hierarchical_contrastive.enabled: false
+            multi_task.balanced_contrastive.enabled: false
+        - name: hierarchical
+          overrides:
+            multi_task.hierarchical_contrastive.enabled: true
+            multi_task.hierarchical_contrastive.weight: 0.05
+            multi_task.hierarchical_contrastive.temperature: 0.1
+            multi_task.hierarchical_contrastive.use_two_views: true
+            multi_task.balanced_contrastive.enabled: false
+        - name: balanced
+          overrides:
+            model.prototype_classifier.enabled: true
+            multi_task.hierarchical_contrastive.enabled: false
+            multi_task.balanced_contrastive.enabled: true
+            multi_task.balanced_contrastive.weight: 0.1
+            multi_task.balanced_contrastive.temperature: 0.1
+            multi_task.balanced_contrastive.include_class_prototypes: true
+        - name: hierarchical_and_balanced
+          overrides:
+            model.prototype_classifier.enabled: true
+            multi_task.hierarchical_contrastive.enabled: true
+            multi_task.hierarchical_contrastive.weight: 0.05
+            multi_task.hierarchical_contrastive.temperature: 0.1
+            multi_task.hierarchical_contrastive.use_two_views: true
+            multi_task.balanced_contrastive.enabled: true
+            multi_task.balanced_contrastive.weight: 0.1
+            multi_task.balanced_contrastive.temperature: 0.1
+            multi_task.balanced_contrastive.include_class_prototypes: true
+      selection: {top_k: 2}
+
+    - name: stage2_scope
+      type: conditions
+      parent: contrastive
+      inherit_top_k: 2
+      common_overrides:
+        long_tail.staged_training.enabled: true
+        long_tail.staged_training.stage2_epochs: 10
+        long_tail.staged_training.head_replay_fraction: 0.5
+        model.species_classifier.type: cosine
+        model.prototype_classifier.enabled: true
+      conditions:
+        - name: keep_heads
+          baseline: true
+          overrides:
+            long_tail.staged_training.classifier_initialisation: keep
+            long_tail.staged_training.trainable_scope: heads
+        - name: prototype_heads
+          overrides:
+            long_tail.staged_training.classifier_initialisation: prototype
+            long_tail.staged_training.trainable_scope: heads
+        - name: keep_last_block
+          overrides:
+            long_tail.staged_training.classifier_initialisation: keep
+            long_tail.staged_training.trainable_scope: heads_and_last_block
+        - name: prototype_last_block
+          overrides:
+            long_tail.staged_training.classifier_initialisation: prototype
+            long_tail.staged_training.trainable_scope: heads_and_last_block
+      selection: {top_k: 2}
+
+    - name: stage2_schedule
+      type: conditions
+      parent: stage2_scope
+      inherit_top_k: 2
+      conditions:
+        - {name: epochs5_replay50, overrides: {long_tail.staged_training.stage2_epochs: 5, long_tail.staged_training.head_replay_fraction: 0.5}}
+        - {name: epochs10_replay25, overrides: {long_tail.staged_training.stage2_epochs: 10, long_tail.staged_training.head_replay_fraction: 0.25}}
+        - {name: epochs10_replay50, baseline: true, overrides: {long_tail.staged_training.stage2_epochs: 10, long_tail.staged_training.head_replay_fraction: 0.5}}
+        - {name: epochs10_replay75, overrides: {long_tail.staged_training.stage2_epochs: 10, long_tail.staged_training.head_replay_fraction: 0.75}}
+        - {name: epochs20_replay50, overrides: {long_tail.staged_training.stage2_epochs: 20, long_tail.staged_training.head_replay_fraction: 0.5}}
+      selection: {top_k: 2}
+
+    - name: dual_classifier
+      type: conditions
+      parent: stage2_schedule
+      inherit_top_k: 2
+      common_overrides:
+        training.sampling.strategy: random
+        training.class_weight: false
+        training.logit_adjustment.enabled: false
+      conditions:
+        - name: single_head
+          baseline: true
+          overrides: {model.dual_species_classifier.enabled: false}
+        - name: dual_natural
+          overrides:
+            model.dual_species_classifier.enabled: true
+            model.dual_species_classifier.inference.mode: natural
+            training.dual_species_classifier.balanced_method: logit_adjustment
+            training.dual_species_classifier.tau: 0.5
+        - name: dual_balanced
+          overrides:
+            model.dual_species_classifier.enabled: true
+            model.dual_species_classifier.inference.mode: balanced
+            training.dual_species_classifier.balanced_method: logit_adjustment
+            training.dual_species_classifier.tau: 0.5
+        - name: dual_fixed_fusion
+          overrides:
+            model.dual_species_classifier.enabled: true
+            model.dual_species_classifier.inference.mode: fused
+            model.dual_species_classifier.inference.frequency_dependent: false
+            model.dual_species_classifier.inference.natural_weight: 0.5
+            training.dual_species_classifier.balanced_method: logit_adjustment
+            training.dual_species_classifier.tau: 0.5
+        - name: dual_frequency_fusion
+          overrides:
+            model.dual_species_classifier.enabled: true
+            model.dual_species_classifier.inference.mode: fused
+            model.dual_species_classifier.inference.frequency_dependent: true
+            training.dual_species_classifier.balanced_method: logit_adjustment
+            training.dual_species_classifier.tau: 0.5
+      selection: {top_k: 1}
+
+    - name: taxonomic_inference
+      type: evaluation_only
+      parent: dual_classifier
+      inherit_top_k: 1
+      retrain: false
+      common_overrides:
+        evaluation.taxonomic_distance.enabled: true
+      conditions:
+        - name: raw_top1
+          baseline: true
+          overrides: {inference.taxonomic_minimum_risk.enabled: false}
+        - name: minimum_risk
+          overrides: {inference.taxonomic_minimum_risk.enabled: true}
+      selection: {top_k: 1}
+
+    - name: fine_tune_320
+      type: fine_tune
+      parent: taxonomic_inference
+      inherit_top_k: 1
+      overrides:
+        preprocessing.image_size: 320
+        training.lr: 0.00001
+        training.epochs: 30
+        training.optimizer.name: adamw
+      checkpoint: {source: parent_best, load_model: true, load_optimizer: false}
+      selection: {top_k: 1}
+
+    - name: fine_tune_384
+      type: fine_tune
+      parent: fine_tune_320
+      inherit_top_k: 1
+      overrides:
+        preprocessing.image_size: 384
+        training.lr: 0.000003
+        training.epochs: 20
+        training.optimizer.name: adamw
+      checkpoint: {source: parent_best, load_model: true, load_optimizer: false}
+      selection: {top_k: 1}

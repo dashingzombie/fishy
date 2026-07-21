@@ -39,6 +39,8 @@ slurm:
     copy_data: false
     data_include: []
     reuse_ready_cache: true
+    # Copy the ready cache from slurm.paths.cache_root into this job's TMPDIR,
+    # then explicitly remove only that staged copy from the EXIT trap.
     cleanup_after_run: true
     copy_cache_to_tmp: 1
     tmp_reserve_gb: 5

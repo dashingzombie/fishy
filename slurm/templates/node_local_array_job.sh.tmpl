@@ -117,7 +117,7 @@ CACHE_LOCK="${SCRATCH_ROOT}/IMAGE_CACHE.lock"
 (
     flock -x 200
     if [[ ! -f "$CACHE_READY_MARKER" ]]; then
-        python - "$RESOLVED_CONFIG" "$DATA_ROOT" "$CACHE_ROOT" <<'PY'
+        python - "$RESOLVED_CONFIG" "$DATA_ROOT" "$METADATA_CSV" "$CACHE_ROOT" <<'PY'
 import sys
 from pathlib import Path
 
@@ -127,12 +127,12 @@ from fish_species.data.metadata import prepare_metadata
 
 config_path = sys.argv[1]
 data_root = sys.argv[2]
-cache_root = sys.argv[3]
+metadata_csv = sys.argv[3]
+cache_root = sys.argv[4]
 config = load_config(config_path)
 config["data"].update(
     root_dir=data_root,
-    metadata_csv=f"{data_root}/01_Segmented/global_metadata.csv",
-    image_col="rel_path_seg",
+    metadata_csv=metadata_csv,
 )
 config.setdefault("cache", {}).update(
     enabled=True,

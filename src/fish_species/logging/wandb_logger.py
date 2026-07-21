@@ -197,12 +197,8 @@ class WandbLogger:
         return enabled, condition_set, task_set
 
     def should_log_confusion_matrix(self, condition: str, task: str) -> bool:
-        enabled, conditions, tasks = self._confusion_settings()
-        return (
-            enabled
-            and (conditions is None or str(condition) in conditions)
-            and (tasks is None or str(task) in tasks)
-        )
+        """Return false: confusion-matrix generation/upload is disabled."""
+        return False
 
     def log_confusion_matrix(
         self,
@@ -416,16 +412,11 @@ class WandbLogger:
         model_paths = [
             item
             for item in existing
-            if item[0] == "best_model.pt"
-            or item[1].name == "best_model.pt"
+            if item[1].suffix.lower() in {".pt", ".pth", ".ckpt", ".safetensors"}
         ]
         lightweight = [item for item in existing if item not in model_paths]
         base_metadata = self._artifact_metadata()
         scientific_metadata = {**base_metadata, **dict(metadata or {})}
-        model_artifact_metadata = {
-            **scientific_metadata,
-            **dict(model_metadata or {}),
-        }
         logged: list[str] = []
         try:
             if lightweight:
@@ -436,20 +427,6 @@ class WandbLogger:
                     metadata=scientific_metadata,
                 )
                 for _, path in lightweight:
-                    artifact.add_file(str(path))
-                self._run.log_artifact(artifact)
-                logged.append(artifact_name)
-
-            wandb_cfg = self.cfg.get("wandb", {}) or {}
-            log_model = False
-            if log_model and model_paths:
-                artifact_name = f"{self.run_name}-best-model"
-                artifact = self.backend.Artifact(
-                    name=artifact_name,
-                    type="model",
-                    metadata=model_artifact_metadata,
-                )
-                for _, path in model_paths:
                     artifact.add_file(str(path))
                 self._run.log_artifact(artifact)
                 logged.append(artifact_name)

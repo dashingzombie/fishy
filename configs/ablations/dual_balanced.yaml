@@ -1,0 +1,6 @@
+extends: ../../config.yaml
+model:
+  dual_species_classifier: {enabled: true, inference: {mode: balanced}}
+training:
+  dual_species_classifier: {natural_loss_weight: 0.0, balanced_method: logit_adjustment}
+

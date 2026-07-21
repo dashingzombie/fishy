@@ -24,7 +24,9 @@ slurm:
     memory: 2048
     time_limit: "00:30:00"
   scratch:
-    mode: node_local
+    # Build directly on each GPU node from shared data. The cache itself is
+    # outside submission scratch so later sweeps reuse it.
+    mode: node_local_cache
     # The resolver appends one timestamp+PID submission ID. Static node-local
     # roots are rejected before rendering or cleanup.
     root: /scratch/${USER}/fish_node_local_sweep
@@ -33,13 +35,9 @@ slurm:
     # Deliberately empty: node-local workflows must explicitly identify the
     # GPU nodes whose independent /scratch filesystems are prepared/cleaned.
     nodes: []
-    copy_project: true
-    copy_data: true
-    data_include:
-      - label_train.json
-      - all_classes.pkl
-      - "splits/***"
-      - "images/***"
+    copy_project: false
+    copy_data: false
+    data_include: []
     reuse_ready_cache: true
     cleanup_after_run: true
     copy_cache_to_tmp: 0
@@ -53,7 +51,7 @@ slurm:
     data_root: ${HOME}/classification/data
     metadata_csv: ${HOME}/classification/data/label_train.json
     results_root: outputs_slurm
-    cache_root: ${HOME}/classification/data/image_cache
+    cache_root: /scratch/${USER}/fish_species_image_cache
   logging:
     directory: logs/slurm
     separate_stdout_stderr: true

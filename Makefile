@@ -12,6 +12,8 @@ GPUS ?=
 GHPC_NODES ?=
 CHECKPOINT ?=
 ARTIFACTS_DIR ?= logs/generated/plan-$(shell date -u +%Y%m%dT%H%M%S%N)
+PIPELINE ?= configs/sweeps/fish_long_tail_pipeline.yaml
+CLUSTER_CONFIG ?= configs/clusters/ghpc.yaml
 
 SLURM = PYTHONPATH=src $(PYTHON) -m fish_species.slurm
 CLUSTER_ARG = $(if $(strip $(CLUSTER)),--cluster-config "$(CLUSTER)",)
@@ -33,7 +35,7 @@ TRAIN_OVERRIDE_VALUES = sweep.enabled=false \
 TRAIN_OVERRIDE_ARGS = $(if $(strip $(TRAIN_OVERRIDE_VALUES)),--override $(TRAIN_OVERRIDE_VALUES),)
 TRAIN_LAUNCH = PYTHONPATH=src $(if $(and $(strip $(GPUS)),$(filter-out 1,$(GPUS))),torchrun --standalone --nproc_per_node=$(GPUS) -m fish_species.training,$(PYTHON) -m fish_species.training)
 
-.PHONY: help validate inspect dry-run train fine-tune-320 fine-tune-384 submit status collect test clean-generated
+.PHONY: help validate inspect dry-run train fine-tune-320 fine-tune-384 submit status collect sweep-plan sweep-submit sweep-status sweep-advance sweep-resume sweep-cancel test clean-generated
 
 help: ## Show the supported repository commands.
 	@echo "Fish Species commands"
@@ -47,6 +49,11 @@ help: ## Show the supported repository commands.
 	@echo "  make submit             Explicitly render and submit to SLURM."
 	@echo "  make status             Summarise filesystem and scheduler status."
 	@echo "  make collect            Re-run canonical result aggregation."
+	@echo "  make sweep-plan         Validate and inspect a phased sweep pipeline."
+	@echo "  make sweep-submit       Submit its first incomplete phase."
+	@echo "  make sweep-status       Inspect resumable pipeline state."
+	@echo "  make sweep-advance      Collect/rank and submit the next phase."
+	@echo "  make sweep-resume       Resume without repeating successful runs."
 	@echo "  make test               Run the complete CPU-only unittest suite."
 	@echo "  make clean-generated    Remove only generated Slurm plans."
 	@echo
@@ -98,6 +105,30 @@ status: ## Summarise jobs and filesystem-derived run state.
 collect: ## Aggregate existing results without retraining.
 	PYTHONPATH=src $(PYTHON) -m fish_species.slurm collect \
 		--results-root "$(RESULTS_ROOT)"
+
+sweep-plan: ## Validate and report a sequential sweep without writing execution state.
+	PYTHONPATH=src $(PYTHON) -m fish_species.sweeps.pipeline plan \
+		--pipeline "$(PIPELINE)"
+
+sweep-submit: ## Submit the first incomplete pipeline phase.
+	PYTHONPATH=src $(PYTHON) -m fish_species.sweeps.pipeline submit \
+		--pipeline "$(PIPELINE)" --cluster-config "$(CLUSTER_CONFIG)"
+
+sweep-status: ## Display pipeline phase, jobs, result counts, and next action.
+	PYTHONPATH=src $(PYTHON) -m fish_species.sweeps.pipeline status \
+		--pipeline "$(PIPELINE)"
+
+sweep-advance: ## Collect/rank the current phase and submit its successor.
+	PYTHONPATH=src $(PYTHON) -m fish_species.sweeps.pipeline advance \
+		--pipeline "$(PIPELINE)" --cluster-config "$(CLUSTER_CONFIG)" --submit
+
+sweep-resume: ## Resume from atomic state without repeating successful runs.
+	PYTHONPATH=src $(PYTHON) -m fish_species.sweeps.pipeline resume \
+		--pipeline "$(PIPELINE)" --cluster-config "$(CLUSTER_CONFIG)"
+
+sweep-cancel: ## Cancel active pipeline-owned jobs while retaining state.
+	PYTHONPATH=src $(PYTHON) -m fish_species.sweeps.pipeline cancel \
+		--pipeline "$(PIPELINE)"
 
 test: ## Run every standard-library test without external data or GPUs.
 	PYTHONPATH=.:src $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
