@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# Shared canonical GHPC node-local array task.
+set -euo pipefail
+
+ARTIFACT_ROOT=@@ARTIFACT_ROOT@@
+CACHE_ROOT=@@CACHE_ROOT@@
+CACHE_READY_MARKER=@@CACHE_READY_MARKER@@
+CONDA_ENV=@@CONDA_ENV@@
+CONDA_SH=@@CONDA_SH@@
+COPY_CACHE_TO_TMP=@@COPY_CACHE_TO_TMP@@
+DATA_ROOT=@@DATA_ROOT@@
+METADATA_CSV=@@METADATA_CSV@@
+MONITORING_ENABLED=@@MONITORING_ENABLED@@
+MONITORING_INTERVAL=@@MONITORING_INTERVAL@@
+PROJECT_ROOT=@@PROJECT_ROOT@@
+RESOLVED_CONFIG_DIR=@@RESOLVED_CONFIG_DIR@@
+RESULTS_ROOT=@@RESULTS_ROOT@@
+RUN_INDEX_FILE=@@RUN_INDEX_FILE@@
+RUN_OUTPUT_ROOT=@@RUN_OUTPUT_ROOT@@
+RUN_SPECS_DIR=@@RUN_SPECS_DIR@@
+SCRATCH_ROOT=@@SCRATCH_ROOT@@
+SETUP_READY_MARKER=@@SETUP_READY_MARKER@@
+TMP_RESERVE_GB=@@TMP_RESERVE_GB@@
+
+: "${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is required}"
+RUN_ID=$(awk -F '\t' -v task_id="$SLURM_ARRAY_TASK_ID" 'NR > 1 && $1 == task_id {print $2}' "$RUN_INDEX_FILE")
+RUN_SPEC_FILE="${RUN_SPECS_DIR}/${RUN_ID}.args"
+RESOLVED_CONFIG="${RESOLVED_CONFIG_DIR}/${RUN_ID}.yaml"
+[[ -n "$RUN_ID" && -f "$RUN_SPEC_FILE" && -f "$RESOLVED_CONFIG" ]] || {
+    echo "Incomplete run artifacts for array index $SLURM_ARRAY_TASK_ID" >&2
+    exit 1
+}
+
+RUN_SCRATCH_OUT="${RUN_OUTPUT_ROOT}/${RUN_ID}"
+RUN_BACK_OUT="${RESULTS_ROOT}/${RUN_ID}"
+PROFILE_DIR="${RUN_SCRATCH_OUT}/profiling"
+mkdir -p "$RUN_SCRATCH_OUT" "$RUN_BACK_OUT" "$PROFILE_DIR" "$CACHE_ROOT"
+cp "$RUN_SPEC_FILE" "$RUN_SCRATCH_OUT/run_overrides.args"
+
+monitor_pids=()
+finish() {
+    local status=$?
+    local copy_status=0
+    trap - EXIT
+    set +e
+    if ((${#monitor_pids[@]})); then
+        kill "${monitor_pids[@]}" 2>/dev/null || true
+        wait "${monitor_pids[@]}" 2>/dev/null || true
+    fi
+    printf '%s\n' "$status" > "$RUN_SCRATCH_OUT/run_status.txt"
+    rsync -a "$RUN_SCRATCH_OUT/" "$RUN_BACK_OUT/"
+    copy_status=$?
+    if ((copy_status != 0 && status == 0)); then
+        status=90
+    fi
+    exit "$status"
+}
+trap finish EXIT
+
+[[ -f "$SETUP_READY_MARKER" ]] || {
+    echo "Node-local setup marker is missing: $SETUP_READY_MARKER" >&2
+    exit 1
+}
+
+if [[ -n "$CONDA_SH" ]]; then
+    source "$CONDA_SH"
+    conda activate "$CONDA_ENV"
+fi
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export WANDB_NAME="$RUN_ID"
+
+python - <<'PY'
+import os
+
+import torch
+
+print("CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
+print("Torch version:", torch.__version__)
+print("Torch CUDA:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+print("GPU count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("GPU name:", torch.cuda.get_device_name(0))
+if os.getenv("WANDB_ENABLED", "false").lower() in {"1", "true", "yes", "on"}:
+    import wandb
+    print("Weights & Biases:", wandb.__version__)
+else:
+    print("Weights & Biases: disabled")
+PY
+
+case "$MONITORING_ENABLED" in
+    true)
+        nvidia-smi \
+            --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,temperature.gpu \
+            --format=csv \
+            -l "$MONITORING_INTERVAL" > "$PROFILE_DIR/gpu_usage.csv" &
+        monitor_pids+=("$!")
+        (
+            while true; do
+                echo "===== $(date) ====="
+                ps -u "$USER" -o pid,ppid,pcpu,pmem,rss,vsz,comm,args \
+                    --sort=-%cpu | head -n 30 || true
+                sleep "$MONITORING_INTERVAL"
+            done
+        ) > "$PROFILE_DIR/cpu_usage.txt" &
+        monitor_pids+=("$!")
+        ;;
+    false) ;;
+    *)
+        echo "MONITORING_ENABLED must be true or false" >&2
+        exit 1
+        ;;
+esac
+
+CACHE_LOCK="${SCRATCH_ROOT}/IMAGE_CACHE.lock"
+(
+    flock -x 200
+    if [[ ! -f "$CACHE_READY_MARKER" ]]; then
+        python - "$RESOLVED_CONFIG" "$DATA_ROOT" "$CACHE_ROOT" <<'PY'
+import sys
+from pathlib import Path
+
+from src.cache import build_image_cache
+from src.utils import load_config
+from fish_species.data.metadata import prepare_metadata
+
+config_path = sys.argv[1]
+data_root = sys.argv[2]
+cache_root = sys.argv[3]
+config = load_config(config_path)
+config["data"].update(
+    root_dir=data_root,
+    metadata_csv=f"{data_root}/01_Segmented/global_metadata.csv",
+    image_col="rel_path_seg",
+)
+config.setdefault("cache", {}).update(
+    enabled=True,
+    cache_dir=cache_root,
+    dir=cache_root,
+    root_dir=cache_root,
+    root_dir_cache=str(Path(cache_root).parent),
+)
+cached = build_image_cache(config, prepare_metadata(config))
+if cached is None or "_cached_image_path" not in cached:
+    raise RuntimeError("Image cache build did not return cached paths")
+if int(cached["_cached_image_path"].notna().sum()) == 0:
+    raise RuntimeError("Image cache build produced no cached images")
+PY
+        touch "$CACHE_READY_MARKER"
+    fi
+) 200>"$CACHE_LOCK"
+
+CACHE_PARENT=$(dirname "$CACHE_ROOT")
+status=0
+srun @@TRAIN_COMMAND@@ --config "$RESOLVED_CONFIG" --single-run --override \
+    data.root_dir="$DATA_ROOT" data.metadata_csv="$METADATA_CSV" \
+    output.out_dir="$RUN_SCRATCH_OUT" sweep.enabled=false \
+    matched_condition_training.enabled=false \
+    wandb.enabled="${WANDB_ENABLED:-false}" \
+    wandb.project="${WANDB_PROJECT:-fish-species}" \
+    wandb.entity="${WANDB_ENTITY:-}" wandb.mode="${WANDB_MODE:-online}" \
+    wandb.group="${WANDB_RUN_GROUP:-}" wandb.name="$RUN_ID" \
+    cache.enabled=true cache.cache_dir="$CACHE_ROOT" cache.dir="$CACHE_ROOT" \
+    cache.root_dir="$CACHE_ROOT" cache.root_dir_cache="$CACHE_PARENT" \
+    split.predefined_split_dir="$PROJECT_ROOT" || status=$?
+exit "$status"

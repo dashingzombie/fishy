@@ -1,0 +1,12 @@
+extends: standard.yaml
+
+# GHPC hierarchy-loss training intentionally inherits the complete standard
+# scientific configuration.  The hierarchy switch below is the sole resolved
+# scientific difference; the planning label is scheduler metadata only.
+multi_task:
+  hierarchy_loss:
+    enabled: true
+
+slurm:
+  planning:
+    experiment_type: hierarchy

@@ -1,0 +1,12 @@
+extends: colour_transforms.yaml
+
+# GHPC transform runs use the same configured transform pipeline.
+wandb:
+  enabled: true
+  project: fish-species-colour-transforms
+  mode: online
+
+slurm:
+  collection:
+    enabled: true
+    kind: standard

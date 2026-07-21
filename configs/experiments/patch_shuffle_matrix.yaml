@@ -1,0 +1,58 @@
+extends: ../../config.yaml
+
+# Focused patch-shuffle experiment used to exercise a non-default matrix.
+# Four pretrained architectures are trained once for each resolved condition:
+# original RGB, a 2x2 patch shuffle, and a 4x4 patch shuffle.  The canonical
+# planner therefore creates 4 models x 3 conditions = 12 training processes.
+model:
+  pretrained: true
+  freeze_backbone: false
+
+sweep:
+  enabled: true
+  parameters:
+    model.name:
+      - resnet18
+      - resnet50
+      - efficientnet_b0
+      - vit_b_16
+  conditions:
+    - {name: original, feature: baseline, transform: original, parameters: {}}
+    - name: patch_shuffle_grid_2
+      feature: shape
+      transform: patch_shuffle
+      strength: 2
+      parameters: {grid_size: 2, seed: 2026}
+    - name: patch_shuffle_grid_4
+      feature: shape
+      transform: patch_shuffle
+      strength: 4
+      parameters: {grid_size: 4, seed: 2026}
+
+# This is post-training evaluation, not another sweep. Each of the 12 selected
+# checkpoints is evaluated on all three test conditions, yielding 36 condition
+# cells (and genus/species task rows) without additional training.
+evaluation:
+  test_conditions:
+    enabled: false
+    conditions: [patch_shuffle_grid_2, patch_shuffle_grid_4]
+    evaluate_original_training: true
+  condition_matrix:
+    enabled: true
+    conditions: [original, patch_shuffle_grid_2, patch_shuffle_grid_4]
+    write_reports: true
+
+slurm:
+  planning:
+    experiment_type: patch_shuffle_matrix
+    external_expansion: dual_cue
+  cpus_per_task: 16
+  memory: 16384
+  time_limit: "04:00:00"
+  array:
+    max_active: 2
+  collection:
+    enabled: true
+    cpus_per_task: 1
+    memory: 4096
+    time_limit: "00:20:00"

@@ -1,0 +1,14 @@
+extends: genome.yaml
+
+# Genome's persistent-cache sweeps historically used the shorter GPU queues,
+# eight CPU workers, and excluded gn-1002.  Dual-cue submissions continue to
+# use the broader Genome cluster profile instead.
+slurm:
+  partition: gpu-short,gpu-h200
+  cpus_per_task: 8
+  scratch:
+    mode: persistent_cache
+  submission:
+    extra_sbatch_args: []
+    exclude_nodes:
+      - gn-1002

@@ -1,0 +1,10 @@
+# Safe one-run fish genus/species classifier.
+extends: configs/defaults/base.yaml
+
+# The supplied train, test, and unseen images all live in ../data/images.
+data:
+  root_dir: "../data"
+  image_dirs:
+    train: "images"
+    test: "images"
+    unseen: "images"

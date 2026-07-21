@@ -1,0 +1,12 @@
+extends: dual_cue.yaml
+
+# GHPC historically used the general fish-species W&B project.  Keeping this
+# in a cluster-specific child avoids changing the Genome dual-cue experiment.
+wandb:
+  enabled: true
+  project: fish-species
+
+slurm:
+  collection:
+    enabled: true
+    kind: dual-cue

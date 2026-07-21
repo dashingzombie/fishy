@@ -1,0 +1,21 @@
+name: fishspecies
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch
+  - torchvision
+  - timm>=1.0.20
+  - scikit-learn
+  - opencv
+  - ipykernel
+  - pandas
+  - matplotlib
+  - tqdm
+  - ipywidgets
+  - pyyaml
+  - wandb
+  - umap-learn
+  - plotly
+  - nbformat

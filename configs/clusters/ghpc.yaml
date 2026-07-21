@@ -1,0 +1,65 @@
+slurm:
+  enabled: true
+  cluster_profile: ghpc
+  account: fish-species
+  partition: ghpc_gpu
+  nodes: 1
+  ntasks: 1
+  cpus_per_task: 8
+  memory: 32G
+  time_limit: "12:00:00"
+  gpus_per_task: 1
+  array:
+    max_active: 4
+  setup:
+    enabled: true
+    per_node: true
+    cpus_per_task: 4
+    memory: 8192
+    time_limit: "01:00:00"
+  cleanup:
+    enabled: true
+    per_node: true
+    cpus_per_task: 1
+    memory: 2048
+    time_limit: "00:30:00"
+  scratch:
+    mode: node_local
+    # The resolver appends one timestamp+PID submission ID. Static node-local
+    # roots are rejected before rendering or cleanup.
+    root: /scratch/${USER}/fish_node_local_sweep
+    unique_per_submission: true
+    submission_id: null
+    # Deliberately empty: node-local workflows must explicitly identify the
+    # GPU nodes whose independent /scratch filesystems are prepared/cleaned.
+    nodes: []
+    copy_project: true
+    copy_data: true
+    data_include:
+      - label_train.json
+      - all_classes.pkl
+      - "splits/***"
+      - "images/***"
+    reuse_ready_cache: true
+    cleanup_after_run: true
+    copy_cache_to_tmp: 0
+    tmp_reserve_gb: 0
+    ready_marker: READY
+  environment:
+    conda_sh: ${HOME}/miniconda3/etc/profile.d/conda.sh
+    conda_env: fishspecies
+  paths:
+    project_root: ${HOME}/classification/fish-species
+    data_root: ${HOME}/classification/data
+    metadata_csv: ${HOME}/classification/data/label_train.json
+    results_root: outputs_slurm
+    cache_root: ${HOME}/classification/data/image_cache
+  logging:
+    directory: logs/slurm
+    separate_stdout_stderr: true
+  monitoring:
+    enabled: true
+    interval_seconds: 5
+  submission:
+    extra_sbatch_args: []
+    exclude_nodes: []

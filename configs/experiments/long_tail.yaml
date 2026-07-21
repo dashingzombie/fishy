@@ -1,0 +1,41 @@
+extends: ../../config.yaml
+
+# Main 224 px long-tail experiment. Stage 1 selects on species with >10
+# labeled images. Stage 2 adapts on tail species for a fixed period while
+# replaying head examples. Override sampling/logit adjustment independently.
+preprocessing:
+  image_size: 224
+
+split:
+  strategy: long_tail
+
+long_tail:
+  head_min_samples: 11
+  staged_training:
+    enabled: true
+    stage2_epochs: 20
+    head_replay_fraction: 0.25
+
+training:
+  batch_size: 8
+  use_amp: true
+  optimizer: {name: adamw}
+  sampling: {strategy: random}
+  logit_adjustment:
+    enabled: false
+    task: species
+    tau: 1.0
+
+multi_task:
+  selection_metric: species_accuracy
+
+sweep:
+  enabled: true
+  parameters:
+    model.name:
+      - dinov3_vits16
+      - dinov3_vitb16
+      - dinov3_vitl16
+      - dinov3_convnext_small
+      - dinov3_convnext_base
+      - dinov3_convnext_large

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRATCH_ROOT=@@SCRATCH_ROOT@@
+SUBMISSION_ID=@@SUBMISSION_ID@@
+[[ "$SUBMISSION_ID" =~ ^[0-9]{8}_[0-9]{6}_[0-9]+$ ]] || {
+    echo "Refusing cleanup with invalid submission ID: $SUBMISSION_ID" >&2
+    exit 2
+}
+[[ "$SCRATCH_ROOT" == /scratch/* || "$SCRATCH_ROOT" == /tmp/* ]] || {
+    echo "Refusing unsafe scratch cleanup: $SCRATCH_ROOT" >&2
+    exit 2
+}
+[[ "$SCRATCH_ROOT" == *"$SUBMISSION_ID"* ]] || {
+    echo "Scratch root does not contain submission ID: $SCRATCH_ROOT" >&2
+    exit 2
+}
+rm -rf -- "$SCRATCH_ROOT"

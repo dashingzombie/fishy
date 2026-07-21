@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Standalone persistent-cache builder retained for direct sbatch workflows.
+#SBATCH --account=@@ACCOUNT@@
+#SBATCH --job-name=fish_build_cache
+#SBATCH --cpus-per-task=@@CPUS_PER_TASK@@
+#SBATCH --mem=@@MEMORY@@
+#SBATCH --time=@@TIME_LIMIT@@
+#SBATCH --output=fish_build_cache_%j.out
+#SBATCH --error=fish_build_cache_%j.err
+set -euo pipefail
+
+PROJECT_ROOT=@@PROJECT_ROOT@@
+CONFIG_PATH=@@CONFIG_PATH@@
+DATA_ROOT=@@DATA_ROOT@@
+METADATA_CSV=@@METADATA_CSV@@
+CACHE_ROOT=@@CACHE_ROOT@@
+CONDA_SH=@@CONDA_SH@@
+CONDA_ENV=@@CONDA_ENV@@
+
+if [[ -n "$CONDA_SH" ]]; then
+    source "$CONDA_SH"
+    conda activate "$CONDA_ENV"
+fi
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+force_args=()
+case "${FORCE_REBUILD:-0}" in
+    0) ;;
+    1) force_args+=(--force-rebuild) ;;
+    *)
+        echo "FORCE_REBUILD must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
+
+python -m fish_species.cache build \
+    --config "$CONFIG_PATH" \
+    --data-root "$DATA_ROOT" \
+    --metadata-csv "$METADATA_CSV" \
+    --cache-dir "$CACHE_ROOT" \
+    --image-col "${IMAGE_COL:-rel_path_seg}" \
+    "${force_args[@]}"
+
+python -m fish_species.cache verify --cache-dir "$CACHE_ROOT"

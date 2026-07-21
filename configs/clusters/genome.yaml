@@ -1,0 +1,63 @@
+slurm:
+  enabled: true
+  cluster_profile: genome
+  account: fish-species
+  partition: gpu-short,gpu-h200,gpu-l40s
+  nodes: 1
+  ntasks: 1
+  cpus_per_task: 8
+  memory: 12384
+  time_limit: "01:30:00"
+  gpus_per_task: 1
+  array:
+    max_active: 6
+  setup:
+    enabled: false
+    per_node: false
+    cpus_per_task: 8
+    memory: 16G
+    time_limit: "02:00:00"
+  collection:
+    enabled: true
+    # The historical Genome collector used the scheduler's default CPU
+    # partition rather than inheriting the GPU array partition.
+    partition: null
+    cpus_per_task: 1
+    memory: 4096
+    time_limit: "00:20:00"
+  cleanup:
+    enabled: false
+    per_node: false
+    cpus_per_task: 1
+    memory: 2048
+    time_limit: "00:30:00"
+  scratch:
+    mode: job_local_cache
+    root: /tmp/${USER}/fish_species
+    nodes: []
+    copy_project: false
+    copy_data: false
+    data_include: []
+    reuse_ready_cache: true
+    cleanup_after_run: true
+    copy_cache_to_tmp: 1
+    tmp_reserve_gb: 5
+    ready_marker: CACHE_READY
+  environment:
+    conda_sh: ${HOME}/miniforge3/etc/profile.d/conda.sh
+    conda_env: fishspecies
+  paths:
+    project_root: ${HOME}/classification/fish-species
+    data_root: ${HOME}/classification/data
+    metadata_csv: ${HOME}/classification/data/label_train.json
+    results_root: outputs_slurm
+    cache_root: ${HOME}/classification/data/image_cache
+  logging:
+    directory: logs/slurm
+    separate_stdout_stderr: true
+  monitoring:
+    enabled: false
+    interval_seconds: 5
+  submission:
+    extra_sbatch_args: []
+    exclude_nodes: []

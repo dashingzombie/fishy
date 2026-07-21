@@ -1,0 +1,98 @@
+extends: ../../config.yaml
+
+# The canonical trainer derives its behaviour from these switches.  Per-run
+# experiment.type remains inferred: transformed conditions are matched training,
+# while the original condition may additionally run fixed-RGB stress evaluation.
+multi_task:
+  hierarchy_loss:
+    enabled: true
+
+wandb:
+  enabled: true
+  project: fish-species-cues
+  # Genome dual-cue submissions historically logged online unless the caller
+  # explicitly selected another mode through configuration or --legacy-env.
+  mode: online
+
+sweep:
+  enabled: true
+  parameters:
+    model.name:
+      - convnext_base
+      - vit_b_16
+  conditions:
+    - {name: original, feature: baseline, transform: original, parameters: {}}
+    - name_template: saturation_{percent:03d}pct
+      feature: colour
+      transform: saturation
+      parameter: retention
+      range: {start: 0.99, stop: 0.01, step: -0.01}
+    - {name: grayscale, feature: colour, transform: grayscale, strength: 1.0, parameters: {}}
+    - name: channel_shuffle_201
+      feature: colour
+      transform: channel_shuffle
+      strength: 1.0
+      parameters: {order: [2, 0, 1]}
+    - name: bilateral_d5_c25_s25
+      feature: texture
+      transform: bilateral_filter
+      strength: 25.0
+      parameters: {diameter: 5, sigma_colour: 25.0, sigma_space: 25.0}
+    - name: bilateral_d7_c50_s50
+      feature: texture
+      transform: bilateral_filter
+      strength: 50.0
+      parameters: {diameter: 7, sigma_colour: 50.0, sigma_space: 50.0}
+    - name: bilateral_d9_c100_s100
+      feature: texture
+      transform: bilateral_filter
+      strength: 100.0
+      parameters: {diameter: 9, sigma_colour: 100.0, sigma_space: 100.0}
+    - {name: gaussian_sigma_0.5, feature: texture, transform: gaussian_blur, strength: 0.5, parameters: {sigma: 0.5}}
+    - {name: gaussian_sigma_1, feature: texture, transform: gaussian_blur, strength: 1.0, parameters: {sigma: 1.0}}
+    - {name: gaussian_sigma_2, feature: texture, transform: gaussian_blur, strength: 2.0, parameters: {sigma: 2.0}}
+    - {name: gaussian_sigma_4, feature: texture, transform: gaussian_blur, strength: 4.0, parameters: {sigma: 4.0}}
+    - {name: patch_shuffle_grid_2, feature: shape, transform: patch_shuffle, strength: 2, parameters: {grid_size: 2, seed: 2026}}
+    - {name: patch_shuffle_grid_4, feature: shape, transform: patch_shuffle, strength: 4, parameters: {grid_size: 4, seed: 2026}}
+    - {name: patch_shuffle_grid_8, feature: shape, transform: patch_shuffle, strength: 8, parameters: {grid_size: 8, seed: 2026}}
+
+# The original-trained run alone receives this deterministic stress battery.
+# It never expands the number of training jobs.
+evaluation:
+  test_conditions:
+    enabled: false
+    evaluate_original_training: true
+    conditions:
+      - name_template: saturation_{percent:03d}pct
+        feature: colour
+        transform: saturation
+        parameter: retention
+        range: {start: 1.0, stop: 0.0, step: -0.01}
+      - {name: grayscale, feature: colour, transform: grayscale, strength: 1.0, parameters: {}}
+      - {name: channel_shuffle_201, feature: colour, transform: channel_shuffle, strength: 1.0, parameters: {order: [2, 0, 1]}}
+      - {name: bilateral_d5_c25_s25, feature: texture, transform: bilateral_filter, strength: 25.0, parameters: {diameter: 5, sigma_colour: 25.0, sigma_space: 25.0}}
+      - {name: bilateral_d7_c50_s50, feature: texture, transform: bilateral_filter, strength: 50.0, parameters: {diameter: 7, sigma_colour: 50.0, sigma_space: 50.0}}
+      - {name: bilateral_d9_c100_s100, feature: texture, transform: bilateral_filter, strength: 100.0, parameters: {diameter: 9, sigma_colour: 100.0, sigma_space: 100.0}}
+      - {name: gaussian_sigma_0.5, feature: texture, transform: gaussian_blur, strength: 0.5, parameters: {sigma: 0.5}}
+      - {name: gaussian_sigma_1, feature: texture, transform: gaussian_blur, strength: 1.0, parameters: {sigma: 1.0}}
+      - {name: gaussian_sigma_2, feature: texture, transform: gaussian_blur, strength: 2.0, parameters: {sigma: 2.0}}
+      - {name: gaussian_sigma_4, feature: texture, transform: gaussian_blur, strength: 4.0, parameters: {sigma: 4.0}}
+      - {name: patch_shuffle_grid_2, feature: shape, transform: patch_shuffle, strength: 2, parameters: {grid_size: 2, seed: 2026}}
+      - {name: patch_shuffle_grid_4, feature: shape, transform: patch_shuffle, strength: 4, parameters: {grid_size: 4, seed: 2026}}
+      - {name: patch_shuffle_grid_8, feature: shape, transform: patch_shuffle, strength: 8, parameters: {grid_size: 8, seed: 2026}}
+  condition_matrix: {enabled: false, conditions: [], write_reports: true}
+
+slurm:
+  planning:
+    experiment_type: dual_cue
+    external_expansion: dual_cue
+  cpus_per_task: 16
+  memory: 16384
+  time_limit: "04:00:00"
+  array:
+    max_active: 2
+  collection:
+    enabled: true
+    cpus_per_task: 1
+    memory: 4096
+    time_limit: "00:20:00"

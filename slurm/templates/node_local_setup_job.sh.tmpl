@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ROOT=@@PROJECT_ROOT@@
+DATA_ROOT=@@DATA_ROOT@@
+SCRATCH_ROOT=@@SCRATCH_ROOT@@
+SCRATCH_PROJECT=@@SCRATCH_PROJECT@@
+SCRATCH_DATA=@@SCRATCH_DATA@@
+SCRATCH_OUTPUTS=@@SCRATCH_OUTPUTS@@
+READY_MARKER=@@READY_MARKER@@
+SUBMISSION_ID=@@SUBMISSION_ID@@
+
+[[ -n "$SUBMISSION_ID" && "$SCRATCH_ROOT" == *"$SUBMISSION_ID"* ]] || {
+    echo "Unsafe or non-unique node-local scratch root: $SCRATCH_ROOT" >&2
+    exit 2
+}
+mkdir -p "$SCRATCH_ROOT" "$SCRATCH_PROJECT" "$SCRATCH_DATA" "$SCRATCH_OUTPUTS"
+exec 200>"${SCRATCH_ROOT}/SETUP.lock"
+flock -x 200
+if [[ ! -f "${SCRATCH_ROOT}/${READY_MARKER}" ]]; then
+    find "$SCRATCH_ROOT" -mindepth 1 -maxdepth 1 ! -name SETUP.lock \
+        -exec rm -rf -- {} +
+    mkdir -p "$SCRATCH_PROJECT" "$SCRATCH_DATA" "$SCRATCH_OUTPUTS"
+    rsync -a \
+        --exclude .git \
+        --exclude __pycache__ \
+        --exclude .ipynb_checkpoints \
+        --exclude outputs \
+        --exclude outputs_slurm \
+        "$PROJECT_ROOT/" "$SCRATCH_PROJECT/"
+    @@DATA_COPY_COMMAND@@
+    touch "${SCRATCH_ROOT}/${READY_MARKER}"
+fi
+lscpu

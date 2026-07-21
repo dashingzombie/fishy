@@ -1,0 +1,21 @@
+extends: ../../config.yaml
+
+preprocessing:
+  image_size: 384
+
+fine_tuning:
+  enabled: true
+  checkpoint_path: REQUIRED_224_OR_320_CHECKPOINT.pt
+  reset_optimizer: true
+
+training:
+  batch_size: 4
+  use_amp: true
+  optimizer: {name: adamw}
+
+sweep:
+  enabled: false
+  parameters: {}
+
+output:
+  out_dir: outputs/fine_tune_384

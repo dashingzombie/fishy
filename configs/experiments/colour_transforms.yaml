@@ -1,0 +1,40 @@
+extends: ../../config.yaml
+
+# Each saturation transform is an ordinary configured training condition.
+experiment:
+  type: matched_condition
+
+multi_task:
+  hierarchy_loss:
+    enabled: true
+
+wandb:
+  enabled: true
+
+sweep:
+  enabled: true
+  parameters:
+    model.name:
+      - convnext_base
+      - vit_b_16
+  conditions:
+    - name_template: colour_{percent:03d}pct
+      feature: colour
+      transform: saturation
+      parameter: retention
+      range: {start: 1.0, stop: 0.0, step: -0.01}
+
+slurm:
+  planning:
+    experiment_type: colour_transforms
+    external_expansion: sweep
+  cpus_per_task: 16
+  memory: 16384
+  time_limit: "04:00:00"
+  array:
+    max_active: 2
+  collection:
+    enabled: true
+    cpus_per_task: 1
+    memory: 4096
+    time_limit: "00:20:00"

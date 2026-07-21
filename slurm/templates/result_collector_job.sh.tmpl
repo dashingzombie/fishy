@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ROOT=@@PROJECT_ROOT@@
+RESULTS_ROOT=@@RESULTS_ROOT@@
+CONDA_SH=@@CONDA_SH@@
+CONDA_ENV=@@CONDA_ENV@@
+
+if [[ -n "$CONDA_SH" ]]; then
+    source "$CONDA_SH"
+    conda activate "$CONDA_ENV"
+fi
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+@@COLLECT_COMMAND@@

@@ -1,0 +1,59 @@
+slurm:
+  enabled: false
+  cluster_profile: local
+  account: local
+  partition: local
+  nodes: 1
+  ntasks: 1
+  cpus_per_task: 1
+  memory: 4G
+  time_limit: "01:00:00"
+  gpus_per_task: 0
+  array:
+    max_active: 1
+  setup:
+    enabled: false
+    per_node: false
+    cpus_per_task: 1
+    memory: 1G
+    time_limit: "00:10:00"
+  collection:
+    enabled: false
+    cpus_per_task: 1
+    memory: 1G
+    time_limit: "00:10:00"
+  cleanup:
+    enabled: false
+    per_node: false
+    cpus_per_task: 1
+    memory: 1G
+    time_limit: "00:10:00"
+  scratch:
+    mode: none
+    root: /tmp/fish_species
+    nodes: []
+    copy_project: false
+    copy_data: false
+    data_include: []
+    reuse_ready_cache: false
+    cleanup_after_run: false
+    copy_cache_to_tmp: 0
+    tmp_reserve_gb: 0
+    ready_marker: READY
+  environment:
+    conda_env: fishspecies
+  paths:
+    project_root: .
+    data_root: ../data
+    metadata_csv: ../data/label_train.json
+    results_root: outputs_slurm
+    cache_root: cache/images
+  logging:
+    directory: logs/slurm
+    separate_stdout_stderr: true
+  monitoring:
+    enabled: false
+    interval_seconds: 5
+  submission:
+    extra_sbatch_args: []
+    exclude_nodes: []

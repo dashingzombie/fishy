@@ -1,0 +1,10 @@
+extends: persistent_hierarchy.yaml
+
+# W&B is the sole behavioural difference from persistent_hierarchy.yaml.
+wandb:
+  enabled: true
+  project: fish-species
+  entity: null
+  group: null
+  name: null
+  mode: online

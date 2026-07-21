@@ -1,0 +1,46 @@
+extends: ../../config.yaml
+
+# Ordinary externally expanded multitask sweep using hierarchy consistency and
+# the persistent image cache. Each array task receives exactly one resolved
+# model/configuration and disables every trainer-internal expansion mechanism.
+experiment:
+  type: standard
+
+training:
+  mode: multitask
+
+multi_task:
+  hierarchy_loss:
+    enabled: true
+
+wandb:
+  enabled: false
+
+input_condition:
+  enabled: false
+  condition: original
+  feature: baseline
+  transform: original
+  strength: 0.0
+
+matched_condition_training:
+  enabled: false
+
+test_cue_suppression:
+  enabled: false
+
+sweep:
+  enabled: true
+  parameters:
+    model.name:
+      - convnext_base
+      - vit_b_16
+
+slurm:
+  planning:
+    experiment_type: persistent_hierarchy
+    external_expansion: sweep
+  array:
+    max_active: 12
+  collection:
+    enabled: false

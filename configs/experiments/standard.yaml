@@ -1,0 +1,24 @@
+extends: ../../config.yaml
+
+# Standard complete-label multitask training uses explicit canonical switches.
+experiment:
+  type: standard
+
+multi_task:
+  hierarchy_loss:
+    enabled: true
+
+wandb:
+  enabled: true
+
+sweep:
+  enabled: true
+  parameters:
+    model.name:
+      - convnext_base
+      - vit_b_16
+    multi_task.hierarchy_loss.weight:
+      - 0.0
+      - 0.1
+      - 0.5
+      - 1.0
