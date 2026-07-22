@@ -101,4 +101,7 @@ W&B logs metrics and lightweight scientific records only: model checkpoints
 are excluded, and confusion matrices are not generated.
 The separate [educational internals guide](docs/sweep_pipeline_internals.md)
 explains every sweep function, reused repository API, and key library call.
+For the entire repository, use the
+[complete educational guide](docs/repository_education.md), which covers every
+directory and includes a generated catalog of every Python definition.
 # fishy

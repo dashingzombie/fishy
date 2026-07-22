@@ -50,6 +50,7 @@ docs/*
 !docs/
 !docs/sweep_pipelines.md
 !docs/sweep_pipeline_internals.md
+!docs/repository_education.md
 *.vscode
 #for wandb
 wandb/
